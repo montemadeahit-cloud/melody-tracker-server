@@ -45,9 +45,13 @@ app.post("/scan", upload.single("file"), async (req, res) => {
     form.append("sample_bytes",   req.file.size.toString());
     form.append("timestamp",      timestamp.toString());
 
-    const acrRes  = await fetch(`https://${ACR_HOST}/v1/identify`, { method: "POST", body: form });
+    console.log("Sending to ACRCloud:", ACR_HOST);
+    const acrRes  = await fetch(`https://${ACR_HOST}/v1/identify`, {
+      method: "POST",
+      body: form,
+      timeout: 25000,
+    });
     const acrData = await acrRes.json();
-
     console.log("ACRCloud response:", JSON.stringify(acrData));
     res.json(acrData);
   } catch (err) {
@@ -59,4 +63,3 @@ app.post("/scan", upload.single("file"), async (req, res) => {
 app.listen(port, "0.0.0.0", () => {
   console.log(`Server listening on 0.0.0.0:${port}`);
 });
-
