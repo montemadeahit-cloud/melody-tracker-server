@@ -12,7 +12,7 @@ const app    = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // 🔑 Your AudD API token — never exposed to users
-const AUDD_TOKEN = "process.env.AUDD_TOKEN";
+const AUDD_TOKEN = process.env.AUDD_TOKEN;
 
 app.use(cors()); // Allow requests from your frontend
 
@@ -35,4 +35,5 @@ app.post("/scan", upload.single("file"), async (req, res) => {
   }
 });
 
-app.listen(3001, () => console.log("Melody Tracker server running on port 3001"));
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, "0.0.0.0", () => console.log(`Melody Tracker server running on port ${PORT}`));
