@@ -88,15 +88,15 @@ app.post("/auth/signup", async (req, res) => {
       body: JSON.stringify({ email, password, email_confirm: true }),
     });
     const authData = await authRes.json();
+    console.log("Admin create user result:", JSON.stringify(authData));
     if (authData.error) return res.status(400).json({ error: authData.error.message || authData.error });
 
-    // Save profile with username
-    const profileResult = await sbInsert("profiles", { id: authData.id, username });
-    console.log("Profile insert result:", JSON.stringify(profileResult));
+    const userId = authData.id || authData.user?.id;
+    if (!userId) return res.status(400).json({ error: "Could not create account. Please try again." });
 
-    // Verify it was saved
-    const verify = await sbSelect("profiles", `id=eq.${authData.id}`);
-    console.log("Profile verify:", JSON.stringify(verify));
+    // Save profile with username
+    const profileResult = await sbInsert("profiles", { id: userId, username });
+    console.log("Profile insert result:", JSON.stringify(profileResult));
 
     // Sign them in immediately
     const signInRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
