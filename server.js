@@ -7,7 +7,11 @@ const cors     = require("cors");
 const app  = express();
 const port = process.env.PORT || 8080;
 
-app.use(cors());
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
+}));
 
 const upload = multer({ storage: multer.memoryStorage() });
 
