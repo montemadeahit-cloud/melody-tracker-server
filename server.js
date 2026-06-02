@@ -17,11 +17,12 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const ACR_HOST     = process.env.ACR_HOST;
-const ACR_KEY      = process.env.ACR_KEY;
-const ACR_SECRET   = process.env.ACR_SECRET;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const ACR_HOST         = process.env.ACR_HOST;
+const ACR_KEY          = process.env.ACR_KEY;
+const ACR_SECRET       = process.env.ACR_SECRET;
+const SUPABASE_URL     = process.env.SUPABASE_URL;
+const SUPABASE_KEY     = process.env.SUPABASE_KEY;
+const SUPABASE_SERVICE = process.env.SUPABASE_SERVICE_KEY;
 
 // ── Supabase helpers ──────────────────────────────────────────
 async function sbInsert(table, row) {
@@ -83,14 +84,19 @@ app.post("/auth/signup", async (req, res) => {
     // Create user via admin API (auto-confirms email)
     const authRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
       method:"POST",
-      headers:{ "Content-Type":"application/json", "apikey":SUPABASE_KEY, "Authorization":`Bearer ${SUPABASE_KEY}` },
+      headers:{ "Content-Type":"application/json", "apikey":SUPABASE_SERVICE, "Authorization":`Bearer ${SUPABASE_SERVICE}` },
       body: JSON.stringify({ email, password, email_confirm: true }),
     });
     const authData = await authRes.json();
     if (authData.error) return res.status(400).json({ error: authData.error.message || authData.error });
 
     // Save profile with username
-    await sbInsert("profiles", { id: authData.id, username });
+    const profileResult = await sbInsert("profiles", { id: authData.id, username });
+    console.log("Profile insert result:", JSON.stringify(profileResult));
+
+    // Verify it was saved
+    const verify = await sbSelect("profiles", `id=eq.${authData.id}`);
+    console.log("Profile verify:", JSON.stringify(verify));
 
     // Sign them in immediately
     const signInRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
@@ -113,15 +119,15 @@ app.post("/auth/signin", async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error:"All fields required." });
 
-    // Look up email from username
+    // Look up email from username using service key
     const profiles = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
+    console.log("Looking up username:", username, "Result:", JSON.stringify(profiles));
     if (!Array.isArray(profiles) || profiles.length === 0) return res.status(400).json({ error:"Username not found." });
-
     const profile = profiles[0];
 
-    // We need the email — stored in auth.users, look it up via admin
+    // Get email via admin API
     const userRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${profile.id}`, {
-      headers:{ "apikey":SUPABASE_KEY, "Authorization":`Bearer ${SUPABASE_KEY}` },
+      headers:{ "apikey":SUPABASE_SERVICE, "Authorization":`Bearer ${SUPABASE_SERVICE}` },
     });
     const userData = await userRes.json();
     const email    = userData?.email;
