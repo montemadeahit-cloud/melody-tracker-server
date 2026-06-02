@@ -37,23 +37,20 @@ app.post("/scan", upload.single("file"), async (req, res) => {
     const signature    = crypto.createHmac("sha1", ACR_SECRET).update(stringToSign).digest("base64");
 
     const form = new FormData();
-    form.append("sample",         req.file.buffer, { filename: req.file.originalname, contentType: req.file.mimetype });
-    form.append("access_key",     ACR_KEY);
-    form.append("data_type",      "audio");
+    form.append("sample",            req.file.buffer, { filename: req.file.originalname, contentType: req.file.mimetype });
+    form.append("access_key",        ACR_KEY);
+    form.append("data_type",         "audio");
     form.append("signature_version", "1");
-    form.append("signature",      signature);
-    form.append("sample_bytes",   req.file.size.toString());
-    form.append("timestamp",      timestamp.toString());
+    form.append("signature",         signature);
+    form.append("sample_bytes",      req.file.size.toString());
+    form.append("timestamp",         timestamp.toString());
 
-    console.log("Sending to ACRCloud:", ACR_HOST);
-    const acrRes  = await fetch(`https://${ACR_HOST}/v1/identify`, {
-      method: "POST",
-      body: form,
-      timeout: 25000,
-    });
+    const acrRes  = await fetch(`https://${ACR_HOST}/v1/identify`, { method: "POST", body: form });
     const acrData = await acrRes.json();
+
     console.log("ACRCloud response:", JSON.stringify(acrData));
     res.json(acrData);
+
   } catch (err) {
     console.error("Scan error:", err.message);
     res.status(500).json({ error: "Scan failed: " + err.message });
