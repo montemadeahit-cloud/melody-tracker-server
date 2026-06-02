@@ -80,20 +80,28 @@ app.post("/auth/signup", async (req, res) => {
     const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
     if (Array.isArray(existing) && existing.length > 0) return res.status(400).json({ error:"Username already taken." });
 
-    // Create Supabase auth user
-    const authRes  = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+    // Create user via admin API (auto-confirms email)
+    const authRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json", "apikey":SUPABASE_KEY, "Authorization":`Bearer ${SUPABASE_KEY}` },
+      body: JSON.stringify({ email, password, email_confirm: true }),
+    });
+    const authData = await authRes.json();
+    if (authData.error) return res.status(400).json({ error: authData.error.message || authData.error });
+
+    // Save profile with username
+    await sbInsert("profiles", { id: authData.id, username });
+
+    // Sign them in immediately
+    const signInRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
       method:"POST",
       headers:{ "Content-Type":"application/json", "apikey":SUPABASE_KEY },
       body: JSON.stringify({ email, password }),
     });
-    const authData = await authRes.json();
-    if (authData.error) return res.status(400).json({ error: authData.error.message || authData.error });
-    if (!authData.access_token) return res.status(400).json({ error:"Check your email to confirm your account, then sign in." });
+    const signInData = await signInRes.json();
+    if (signInData.error) return res.status(400).json({ error: signInData.error.message || "Signup succeeded but sign in failed. Please sign in manually." });
 
-    // Save profile
-    await sbInsert("profiles", { id: authData.user.id, username });
-
-    res.json({ access_token: authData.access_token, user: { id: authData.user.id, email: authData.user.email, username } });
+    res.json({ access_token: signInData.access_token, user: { id: signInData.user.id, email: signInData.user.email, username } });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
