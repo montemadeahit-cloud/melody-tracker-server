@@ -1,47 +1,55 @@
 const express  = require("express");
 const multer   = require("multer");
+const cors     = require("cors");
+const crypto   = require("crypto");
 const fetch    = require("node-fetch");
 const FormData = require("form-data");
-const cors     = require("cors");
 
 const app  = express();
 const port = process.env.PORT || 8080;
 
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"]
-}));
+app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type"] }));
 
 const upload = multer({ storage: multer.memoryStorage() });
+
+const ACR_HOST   = process.env.ACR_HOST;
+const ACR_KEY    = process.env.ACR_KEY;
+const ACR_SECRET = process.env.ACR_SECRET;
 
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
-    tokenSet: !!process.env.AUDD_TOKEN,
-    tokenPreview: process.env.AUDD_TOKEN ? process.env.AUDD_TOKEN.slice(0, 6) + "..." : "MISSING"
+    acrHost: ACR_HOST || "MISSING",
+    keySet: !!ACR_KEY,
+    secretSet: !!ACR_SECRET,
   });
 });
 
 app.post("/scan", upload.single("file"), async (req, res) => {
   try {
-    const token = process.env.AUDD_TOKEN;
-    if (!token)    return res.status(500).json({ error: "API token not configured." });
-    if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+    if (!ACR_HOST || !ACR_KEY || !ACR_SECRET)
+      return res.status(500).json({ error: "ACRCloud credentials not configured." });
+    if (!req.file)
+      return res.status(400).json({ error: "No file uploaded." });
+
+    const timestamp    = Math.floor(Date.now() / 1000);
+    const stringToSign = `POST\n/v1/identify\n${ACR_KEY}\naudio\n1\n${timestamp}`;
+    const signature    = crypto.createHmac("sha1", ACR_SECRET).update(stringToSign).digest("base64");
 
     const form = new FormData();
-    form.append("file", req.file.buffer, {
-      filename: req.file.originalname,
-      contentType: req.file.mimetype,
-    });
-    form.append("api_token", token);
-    form.append("return", "spotify,apple_music,deezer,musicbrainz");
+    form.append("sample",         req.file.buffer, { filename: req.file.originalname, contentType: req.file.mimetype });
+    form.append("access_key",     ACR_KEY);
+    form.append("data_type",      "audio");
+    form.append("signature_version", "1");
+    form.append("signature",      signature);
+    form.append("sample_bytes",   req.file.size.toString());
+    form.append("timestamp",      timestamp.toString());
 
-    const auddRes  = await fetch("https://api.audd.io/", { method: "POST", body: form });
-    const auddData = await auddRes.json();
+    const acrRes  = await fetch(`https://${ACR_HOST}/v1/identify`, { method: "POST", body: form });
+    const acrData = await acrRes.json();
 
-    console.log("AudD response:", JSON.stringify(auddData));
-    res.json(auddData);
+    console.log("ACRCloud response:", JSON.stringify(acrData));
+    res.json(acrData);
   } catch (err) {
     console.error("Scan error:", err.message);
     res.status(500).json({ error: "Scan failed: " + err.message });
