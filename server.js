@@ -8,61 +8,51 @@ const FormData   = require("form-data");
 const app  = express();
 const port = process.env.PORT || 8080;
 
-app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type"] }));
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
 app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const ACR_HOST      = process.env.ACR_HOST;
-const ACR_KEY       = process.env.ACR_KEY;
-const ACR_SECRET    = process.env.ACR_SECRET;
-const SUPABASE_URL  = process.env.SUPABASE_URL;
-const SUPABASE_KEY  = process.env.SUPABASE_KEY;
+const ACR_HOST     = process.env.ACR_HOST;
+const ACR_KEY      = process.env.ACR_KEY;
+const ACR_SECRET   = process.env.ACR_SECRET;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-// ── Supabase helper ──────────────────────────────────────────
+// ── Supabase helpers ──────────────────────────────────────────
 async function sbInsert(table, row) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "apikey": SUPABASE_KEY,
-      "Authorization": `Bearer ${SUPABASE_KEY}`,
-      "Prefer": "return=representation",
-    },
+    headers: { "Content-Type":"application/json", "apikey":SUPABASE_KEY, "Authorization":`Bearer ${SUPABASE_KEY}`, "Prefer":"return=representation" },
     body: JSON.stringify(row),
   });
-  return res.json();
+  return r.json();
 }
 
 async function sbSelect(table, filter) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
-    headers: {
-      "apikey": SUPABASE_KEY,
-      "Authorization": `Bearer ${SUPABASE_KEY}`,
-    },
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+    headers: { "apikey":SUPABASE_KEY, "Authorization":`Bearer ${SUPABASE_KEY}` },
   });
-  return res.json();
+  return r.json();
 }
 
-async function sbUpdate(table, filter, row) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      "apikey": SUPABASE_KEY,
-      "Authorization": `Bearer ${SUPABASE_KEY}`,
-    },
-    body: JSON.stringify(row),
+async function sbDelete(table, filter) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+    method: "DELETE",
+    headers: { "apikey":SUPABASE_KEY, "Authorization":`Bearer ${SUPABASE_KEY}` },
   });
-  return res.json();
+  return r.ok;
 }
 
-// ── ACRCloud identify ────────────────────────────────────────
+// ── ACRCloud ──────────────────────────────────────────────────
 async function identify(buffer, filename, mimetype) {
   const timestamp    = Math.floor(Date.now() / 1000);
   const stringToSign = `POST\n/v1/identify\n${ACR_KEY}\naudio\n1\n${timestamp}`;
   const signature    = crypto.createHmac("sha1", ACR_SECRET).update(stringToSign).digest("base64");
-
   const form = new FormData();
   form.append("sample",            buffer, { filename, contentType: mimetype });
   form.append("access_key",        ACR_KEY);
@@ -71,42 +61,97 @@ async function identify(buffer, filename, mimetype) {
   form.append("signature",         signature);
   form.append("sample_bytes",      buffer.length.toString());
   form.append("timestamp",         timestamp.toString());
-
-  const res = await fetch(`https://${ACR_HOST}/v1/identify`, { method: "POST", body: form });
+  const res = await fetch(`https://${ACR_HOST}/v1/identify`, { method:"POST", body:form });
   return res.json();
 }
 
-// ── Health check ─────────────────────────────────────────────
+// ── Health ────────────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.json({
-    status: "ok",
-    acrHost:   ACR_HOST    || "MISSING",
-    keySet:    !!ACR_KEY,
-    secretSet: !!ACR_SECRET,
-    supabase:  !!SUPABASE_URL,
-  });
+  res.json({ status:"ok", acrHost:ACR_HOST||"MISSING", keySet:!!ACR_KEY, secretSet:!!ACR_SECRET, supabase:!!SUPABASE_URL });
 });
 
-// ── Scan endpoint ────────────────────────────────────────────
+// ── Auth: sign up ─────────────────────────────────────────────
+app.post("/auth/signup", async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+    if (!username || !email || !password) return res.status(400).json({ error:"All fields required." });
+
+    // Check username not taken
+    const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
+    if (Array.isArray(existing) && existing.length > 0) return res.status(400).json({ error:"Username already taken." });
+
+    // Create Supabase auth user
+    const authRes  = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json", "apikey":SUPABASE_KEY },
+      body: JSON.stringify({ email, password }),
+    });
+    const authData = await authRes.json();
+    if (authData.error) return res.status(400).json({ error: authData.error.message || authData.error });
+    if (!authData.access_token) return res.status(400).json({ error:"Check your email to confirm your account, then sign in." });
+
+    // Save profile
+    await sbInsert("profiles", { id: authData.user.id, username });
+
+    res.json({ access_token: authData.access_token, user: { id: authData.user.id, email: authData.user.email, username } });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Auth: sign in with username ───────────────────────────────
+app.post("/auth/signin", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error:"All fields required." });
+
+    // Look up email from username
+    const profiles = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
+    if (!Array.isArray(profiles) || profiles.length === 0) return res.status(400).json({ error:"Username not found." });
+
+    const profile = profiles[0];
+
+    // We need the email — stored in auth.users, look it up via admin
+    const userRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${profile.id}`, {
+      headers:{ "apikey":SUPABASE_KEY, "Authorization":`Bearer ${SUPABASE_KEY}` },
+    });
+    const userData = await userRes.json();
+    const email    = userData?.email;
+    if (!email) return res.status(400).json({ error:"Could not find account." });
+
+    // Sign in with email + password
+    const signInRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json", "apikey":SUPABASE_KEY },
+      body: JSON.stringify({ email, password }),
+    });
+    const signInData = await signInRes.json();
+    if (signInData.error || signInData.error_description) return res.status(400).json({ error: signInData.error_description || signInData.error?.message || "Sign in failed." });
+
+    res.json({ access_token: signInData.access_token, user: { id: signInData.user.id, email: signInData.user.email, username: profile.username } });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Scan ──────────────────────────────────────────────────────
 app.post("/scan", upload.single("file"), async (req, res) => {
   try {
-    if (!ACR_HOST || !ACR_KEY || !ACR_SECRET)
-      return res.status(500).json({ error: "ACRCloud credentials not configured." });
-    if (!req.file)
-      return res.status(400).json({ error: "No file uploaded." });
+    if (!ACR_HOST || !ACR_KEY || !ACR_SECRET) return res.status(500).json({ error:"ACRCloud credentials not configured." });
+    if (!req.file) return res.status(400).json({ error:"No file uploaded." });
 
-    const { user_id, username } = req.body;
+    const { user_id } = req.body;
 
-    // Run ACRCloud scan first — this is the priority
+    // Run scan first
     const acrData = await identify(req.file.buffer, req.file.originalname, req.file.mimetype);
-    console.log("ACRCloud response:", JSON.stringify(acrData));
+    console.log("ACRCloud:", JSON.stringify(acrData));
 
-    // Save to Supabase in background — don't let this break the scan
+    // Save to DB in background
     if (user_id && SUPABASE_URL) {
       try {
         const matched     = acrData?.status?.code === 0;
         const resultTitle = matched ? acrData?.metadata?.music?.[0]?.title : null;
-        const inserted = await sbInsert("beats", {
+        await sbInsert("beats", {
           user_id,
           filename:     req.file.originalname,
           status:       matched ? "placed" : "monitoring",
@@ -114,73 +159,36 @@ app.post("/scan", upload.single("file"), async (req, res) => {
           last_result:  resultTitle,
           uploaded_at:  new Date().toISOString(),
         });
-        console.log("Beat saved to Supabase:", JSON.stringify(inserted));
-      } catch (dbErr) {
+      } catch(dbErr) {
         console.error("Supabase save failed (non-fatal):", dbErr.message);
       }
     }
 
     res.json(acrData);
-  } catch (err) {
+  } catch(err) {
     console.error("Scan error:", err.message);
-    res.status(500).json({ error: "Scan failed: " + err.message });
+    res.status(500).json({ error:"Scan failed: " + err.message });
   }
 });
 
-// ── Get user's beats ─────────────────────────────────────────
+// ── Get beats ─────────────────────────────────────────────────
 app.get("/beats/:user_id", async (req, res) => {
   try {
-    if (!SUPABASE_URL) return res.status(500).json({ error: "Supabase not configured." });
     const beats = await sbSelect("beats", `user_id=eq.${req.params.user_id}&order=uploaded_at.desc`);
-    res.json(beats);
-  } catch (err) {
+    res.json(Array.isArray(beats) ? beats : []);
+  } catch(err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── Delete a beat ─────────────────────────────────────────────
+// ── Delete beat ───────────────────────────────────────────────
 app.delete("/beats/:beat_id", async (req, res) => {
   try {
-    if (!SUPABASE_URL) return res.status(500).json({ error: "Supabase not configured." });
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/beats?id=eq.${req.params.beat_id}`, {
-      method: "DELETE",
-      headers: {
-        "apikey": SUPABASE_KEY,
-        "Authorization": `Bearer ${SUPABASE_KEY}`,
-      },
-    });
-    res.json({ success: r.ok });
-  } catch (err) {
+    const ok = await sbDelete("beats", `id=eq.${req.params.beat_id}`);
+    res.json({ success: ok });
+  } catch(err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── Save profile (username) ───────────────────────────────────
-app.post("/profile", async (req, res) => {
-  try {
-    const { user_id, username } = req.body;
-    if (!user_id || !username) return res.status(400).json({ error: "Missing fields." });
-    const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
-    if (Array.isArray(existing) && existing.length > 0) {
-      return res.status(400).json({ error: "Username already taken." });
-    }
-    const result = await sbInsert("profiles", { id: user_id, username });
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Get profile ───────────────────────────────────────────────
-app.get("/profile/:user_id", async (req, res) => {
-  try {
-    const profile = await sbSelect("profiles", `id=eq.${req.params.user_id}`);
-    res.json(Array.isArray(profile) ? profile[0] || null : null);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.listen(port, "0.0.0.0", () => {
-  console.log(`Server listening on 0.0.0.0:${port}`);
-});
+app.listen(port, "0.0.0.0", () => console.log(`Server listening on 0.0.0.0:${port}`));
