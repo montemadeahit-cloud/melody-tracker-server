@@ -12,7 +12,7 @@ const app    = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // 🔑 Your AudD API token — never exposed to users
-const AUDD_TOKEN = "4e8e4019d87c205e49598a78000b120b";
+const AUDD_TOKEN = "process.env.AUDD_TOKEN";
 
 app.use(cors()); // Allow requests from your frontend
 
