@@ -138,6 +138,49 @@ app.get("/beats/:user_id", async (req, res) => {
   }
 });
 
+// ── Delete a beat ─────────────────────────────────────────────
+app.delete("/beats/:beat_id", async (req, res) => {
+  try {
+    if (!SUPABASE_URL) return res.status(500).json({ error: "Supabase not configured." });
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/beats?id=eq.${req.params.beat_id}`, {
+      method: "DELETE",
+      headers: {
+        "apikey": SUPABASE_KEY,
+        "Authorization": `Bearer ${SUPABASE_KEY}`,
+      },
+    });
+    res.json({ success: r.ok });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Save profile (username) ───────────────────────────────────
+app.post("/profile", async (req, res) => {
+  try {
+    const { user_id, username } = req.body;
+    if (!user_id || !username) return res.status(400).json({ error: "Missing fields." });
+    const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
+    if (Array.isArray(existing) && existing.length > 0) {
+      return res.status(400).json({ error: "Username already taken." });
+    }
+    const result = await sbInsert("profiles", { id: user_id, username });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Get profile ───────────────────────────────────────────────
+app.get("/profile/:user_id", async (req, res) => {
+  try {
+    const profile = await sbSelect("profiles", `id=eq.${req.params.user_id}`);
+    res.json(Array.isArray(profile) ? profile[0] || null : null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(port, "0.0.0.0", () => {
   console.log(`Server listening on 0.0.0.0:${port}`);
 });
