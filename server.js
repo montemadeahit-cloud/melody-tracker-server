@@ -97,32 +97,27 @@ app.post("/scan", upload.single("file"), async (req, res) => {
 
     const { user_id, username } = req.body;
 
-    // Save beat record to Supabase if user is logged in
-    let beatId = null;
-    if (user_id && SUPABASE_URL) {
-      const inserted = await sbInsert("beats", {
-        user_id,
-        filename: req.file.originalname,
-        status: "scanning",
-        uploaded_at: new Date().toISOString(),
-      });
-      beatId = inserted?.[0]?.id || null;
-      console.log("Beat saved:", beatId);
-    }
-
-    // Run ACRCloud scan
+    // Run ACRCloud scan first — this is the priority
     const acrData = await identify(req.file.buffer, req.file.originalname, req.file.mimetype);
     console.log("ACRCloud response:", JSON.stringify(acrData));
 
-    // Update beat record with result
-    if (beatId && SUPABASE_URL) {
-      const matched = acrData?.status?.code === 0;
-      const resultTitle = matched ? acrData?.metadata?.music?.[0]?.title : null;
-      await sbUpdate("beats", `id=eq.${beatId}`, {
-        last_scanned: new Date().toISOString(),
-        last_result:  resultTitle,
-        status:       matched ? "placed" : "monitoring",
-      });
+    // Save to Supabase in background — don't let this break the scan
+    if (user_id && SUPABASE_URL) {
+      try {
+        const matched     = acrData?.status?.code === 0;
+        const resultTitle = matched ? acrData?.metadata?.music?.[0]?.title : null;
+        const inserted = await sbInsert("beats", {
+          user_id,
+          filename:     req.file.originalname,
+          status:       matched ? "placed" : "monitoring",
+          last_scanned: new Date().toISOString(),
+          last_result:  resultTitle,
+          uploaded_at:  new Date().toISOString(),
+        });
+        console.log("Beat saved to Supabase:", JSON.stringify(inserted));
+      } catch (dbErr) {
+        console.error("Supabase save failed (non-fatal):", dbErr.message);
+      }
     }
 
     res.json(acrData);
