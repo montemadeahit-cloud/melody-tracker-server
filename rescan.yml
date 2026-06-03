@@ -13,3 +13,4 @@ jobs:
         run: |
           curl -X POST https://elegant-youthfulness-production-06ce.up.railway.app/rescan \
           -H "x-rescan-secret: ${{ secrets.RESCAN_SECRET }}"
+          
