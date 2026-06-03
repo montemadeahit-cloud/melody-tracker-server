@@ -301,7 +301,24 @@ app.post("/scan", upload.single("file"), async (req, res) => {
   }
 });
 
-// ── Get beats ─────────────────────────────────────────────────
+// ── Stream audio from Supabase Storage ───────────────────────
+app.get("/audio/:beat_id", async (req, res) => {
+  try {
+    const beats = await sbSelect("beats", `id=eq.${req.params.beat_id}`);
+    if (!Array.isArray(beats) || !beats[0] || !beats[0].storage_path) {
+      return res.status(404).json({ error: "Beat not found." });
+    }
+    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/beats/${beats[0].storage_path}`, {
+      headers: { "apikey": SUPABASE_SERVICE, "Authorization": `Bearer ${SUPABASE_SERVICE}` },
+    });
+    if (!r.ok) return res.status(404).json({ error: "Audio not found." });
+    res.setHeader("Content-Type", r.headers.get("content-type") || "audio/mpeg");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    r.body.pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.get("/beats/:user_id", async (req, res) => {
   try {
     const beats = await sbSelect("beats", `user_id=eq.${req.params.user_id}&order=uploaded_at.desc`);
