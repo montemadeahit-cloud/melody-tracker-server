@@ -202,32 +202,46 @@ app.post("/auth/signup", async (req, res) => {
     const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
     if (Array.isArray(existing)&&existing.length>0) return res.status(400).json({ error:"Username already taken." });
 
-    // Sign up with regular API (fast)
+    // Sign up — with email confirmation OFF this returns a session directly
     const authRes = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
       method: "POST",
       headers: { "Content-Type":"application/json", "apikey":SUPABASE_KEY },
       body: JSON.stringify({ email, password }),
     });
     const authData = await authRes.json();
+    console.log("Signup response:", JSON.stringify(authData));
+
     if (authData.error) return res.status(400).json({ error: authData.error.message || authData.error });
 
-    const userId = authData.user?.id;
+    const userId      = authData.user?.id;
+    const accessToken = authData.access_token;
+
     if (!userId) return res.status(400).json({ error:"Could not create account." });
 
     // Save profile
     await sbInsert("profiles", { id: userId, username });
 
-    // Sign in immediately
+    // If we got a token directly from signup, use it
+    if (accessToken) {
+      return res.json({ access_token: accessToken, user: { id: userId, email: authData.user.email, username } });
+    }
+
+    // Otherwise sign in separately
     const signInRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
       method: "POST",
       headers: { "Content-Type":"application/json", "apikey":SUPABASE_KEY },
       body: JSON.stringify({ email, password }),
     });
     const signInData = await signInRes.json();
-    if (signInData.error) return res.status(400).json({ error: signInData.error.message || "Account created — please sign in." });
+    console.log("SignIn response:", JSON.stringify(signInData));
+
+    if (signInData.error) return res.status(400).json({ error: "Account created! Please sign in." });
 
     res.json({ access_token: signInData.access_token, user: { id: signInData.user.id, email: signInData.user.email, username } });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) {
+    console.error("Signup error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── Auth: sign in ─────────────────────────────────────────────
@@ -500,11 +514,3 @@ app.post("/rescan", async (req, res) => {
 });
 
 app.listen(port, "0.0.0.0", () => console.log(`Server listening on 0.0.0.0:${port}`));
-process.on('uncaughtException', function(err) {
-  console.error('Uncaught exception:', err.message, err.stack);
-});
-
-process.on('unhandledRejection', function(err) {
-  console.error('Unhandled rejection:', err);
-});
-
