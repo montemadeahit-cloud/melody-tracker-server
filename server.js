@@ -367,14 +367,22 @@ app.post("/subscribe", async (req, res) => {
     const email    = userData?.email;
     if (!email) return res.status(400).json({ error:"User not found." });
 
-    const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
-    const profile  = profiles?.[0];
-    let customerId = profile?.stripe_customer_id;
+    // Retry profile lookup up to 3 times (profile may not be saved yet)
+    let profile = null;
+    for (let i = 0; i < 3; i++) {
+      const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
+      if (Array.isArray(profiles) && profiles.length > 0 && profiles[0].id) {
+        profile = profiles[0];
+        break;
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
 
+    let customerId = profile?.stripe_customer_id;
     if (!customerId) {
       const customer = await stripeRequest("/customers", "POST", { email, "metadata[user_id]":user_id });
       customerId = customer.id;
-      await sbUpdate("profiles", `id=eq.${user_id}`, { stripe_customer_id:customerId });
+      if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { stripe_customer_id:customerId });
     }
 
     const session = await stripeRequest("/checkout/sessions", "POST", {
