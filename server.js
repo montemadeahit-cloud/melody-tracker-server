@@ -17,7 +17,8 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const ACR_HOST         = process.env.ACR_HOST;
+const RESEND_KEY = process.env.RESEND_API_KEY;
+const FROM_EMAIL = process.env.FROM_EMAIL || "alerts@trackmyplacements.com";
 const ACR_KEY          = process.env.ACR_KEY;
 const ACR_SECRET       = process.env.ACR_SECRET;
 const SUPABASE_URL     = process.env.SUPABASE_URL;
@@ -66,7 +67,23 @@ async function identify(buffer, filename, mimetype) {
   return res.json();
 }
 
-// ── Health ────────────────────────────────────────────────────
+// ── Send email via Resend ─────────────────────────────────────
+async function sendEmail(to, subject, html) {
+  try {
+    const r = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${RESEND_KEY}` },
+      body: JSON.stringify({ from: FROM_EMAIL, to, subject, html }),
+    });
+    const d = await r.json();
+    console.log("Email sent:", JSON.stringify(d));
+    return d;
+  } catch(e) {
+    console.error("Email error:", e.message);
+  }
+}
+
+
 app.get("/", (req, res) => {
   res.json({ status:"ok", acrHost:ACR_HOST||"MISSING", keySet:!!ACR_KEY, secretSet:!!ACR_SECRET, supabase:!!SUPABASE_URL });
 });
@@ -156,15 +173,27 @@ app.post("/scan", upload.single("file"), async (req, res) => {
 
     const { user_id } = req.body;
 
+    // Check for duplicate filename for this user
+    if (user_id && SUPABASE_URL) {
+      const existing = await sbSelect("beats", `user_id=eq.${user_id}&filename=eq.${encodeURIComponent(req.file.originalname)}`);
+      if (Array.isArray(existing) && existing.length > 0) {
+        return res.status(400).json({ error: `"${req.file.originalname}" has already been submitted. Remove it from your library first if you want to rescan.` });
+      }
+    }
+
     // Run scan first
     const acrData = await identify(req.file.buffer, req.file.originalname, req.file.mimetype);
     console.log("ACRCloud:", JSON.stringify(acrData));
 
-    // Save to DB in background
+    // Save to DB and send email if placement found
     if (user_id && SUPABASE_URL) {
       try {
         const matched     = acrData?.status?.code === 0;
         const resultTitle = matched ? acrData?.metadata?.music?.[0]?.title : null;
+        const resultArtist = matched ? acrData?.metadata?.music?.[0]?.artists?.[0]?.name : null;
+        const spotifyId   = matched ? acrData?.metadata?.music?.[0]?.external_metadata?.spotify?.track?.id : null;
+        const youtubeId   = matched ? acrData?.metadata?.music?.[0]?.external_metadata?.youtube?.vid : null;
+
         await sbInsert("beats", {
           user_id,
           filename:     req.file.originalname,
@@ -173,8 +202,53 @@ app.post("/scan", upload.single("file"), async (req, res) => {
           last_result:  resultTitle,
           uploaded_at:  new Date().toISOString(),
         });
+
+        // Send email alert if placement found
+        if (matched && RESEND_KEY) {
+          // Get user email
+          const userRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${user_id}`, {
+            headers:{ "apikey":SUPABASE_SERVICE, "Authorization":`Bearer ${SUPABASE_SERVICE}` },
+          });
+          const userData = await userRes.json();
+          const email    = userData?.email;
+
+          if (email) {
+            const listenLink = spotifyId
+              ? `https://open.spotify.com/track/${spotifyId}`
+              : youtubeId
+              ? `https://youtube.com/watch?v=${youtubeId}`
+              : null;
+
+            await sendEmail(
+              email,
+              `🎵 Placement found: "${req.file.originalname}"`,
+              `
+              <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#16161a;color:#f0ece4;border-radius:16px;">
+                <div style="font-size:22px;font-weight:700;margin-bottom:4px;">Placement<span style="color:#c8a96e;">Tracker</span></div>
+                <div style="font-size:11px;color:#6b7385;letter-spacing:.1em;text-transform:uppercase;margin-bottom:28px;">Beat Placement Engine</div>
+
+                <div style="background:rgba(200,169,110,0.08);border:1px solid rgba(200,169,110,0.2);border-radius:12px;padding:20px 20px;margin-bottom:20px;">
+                  <div style="font-size:13px;color:#c8a96e;margin-bottom:10px;text-transform:uppercase;letter-spacing:.08em;">Placement detected</div>
+                  <div style="font-size:18px;font-weight:700;margin-bottom:4px;">${resultTitle}</div>
+                  <div style="font-size:14px;color:rgba(240,236,228,0.6);">${resultArtist || "Unknown artist"}</div>
+                </div>
+
+                <div style="font-size:13px;color:rgba(240,236,228,0.6);margin-bottom:6px;">Your beat</div>
+                <div style="font-size:14px;font-weight:600;margin-bottom:20px;">${req.file.originalname}</div>
+
+                ${listenLink ? `<a href="${listenLink}" style="display:inline-block;background:linear-gradient(135deg,#c8a96e,#e8c98e);color:#1a1400;font-weight:700;font-size:14px;padding:12px 24px;border-radius:10px;text-decoration:none;">Listen to the track ↗</a>` : ""}
+
+                <div style="margin-top:28px;padding-top:20px;border-top:1px solid rgba(255,255,255,0.07);font-size:11px;color:#6b7385;">
+                  You're receiving this because you submitted this beat to Placement Tracker.<br/>
+                  <a href="https://trackmyplacements.com" style="color:#c8a96e;">trackmyplacements.com</a>
+                </div>
+              </div>
+              `
+            );
+          }
+        }
       } catch(dbErr) {
-        console.error("Supabase save failed (non-fatal):", dbErr.message);
+        console.error("Post-scan error (non-fatal):", dbErr.message);
       }
     }
 
