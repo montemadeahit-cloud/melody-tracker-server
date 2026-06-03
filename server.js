@@ -198,34 +198,36 @@ app.post("/auth/signup", async (req, res) => {
     const { username, email, password } = req.body;
     if (!username||!email||!password) return res.status(400).json({ error:"All fields required." });
 
+    // Check username not taken
     const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
     if (Array.isArray(existing)&&existing.length>0) return res.status(400).json({ error:"Username already taken." });
 
-    const authRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
-      method:"POST",
-      headers:{ "Content-Type":"application/json", "apikey":SUPABASE_SERVICE, "Authorization":`Bearer ${SUPABASE_SERVICE}` },
-      body: JSON.stringify({ email, password, email_confirm:true }),
+    // Sign up with regular API (fast)
+    const authRes = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "apikey":SUPABASE_KEY },
+      body: JSON.stringify({ email, password }),
     });
     const authData = await authRes.json();
-    console.log("Admin create user result:", JSON.stringify(authData));
-    if (authData.error) return res.status(400).json({ error: authData.error.message||authData.error });
+    if (authData.error) return res.status(400).json({ error: authData.error.message || authData.error });
 
-    const userId = authData.id||authData.user?.id;
-    if (!userId) return res.status(400).json({ error:"Could not create account. Please try again." });
+    const userId = authData.user?.id;
+    if (!userId) return res.status(400).json({ error:"Could not create account." });
 
-    const profileResult = await sbInsert("profiles", { id:userId, username });
-    console.log("Profile insert result:", JSON.stringify(profileResult));
+    // Save profile
+    await sbInsert("profiles", { id: userId, username });
 
-    const signInRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-      method:"POST",
-      headers:{ "Content-Type":"application/json", "apikey":SUPABASE_KEY },
+    // Sign in immediately
+    const signInRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "apikey":SUPABASE_KEY },
       body: JSON.stringify({ email, password }),
     });
     const signInData = await signInRes.json();
-    if (signInData.error) return res.status(400).json({ error: signInData.error.message||"Signup succeeded but sign in failed." });
+    if (signInData.error) return res.status(400).json({ error: signInData.error.message || "Account created — please sign in." });
 
-    res.json({ access_token:signInData.access_token, user:{ id:signInData.user.id, email:signInData.user.email, username } });
-  } catch(e) { res.status(500).json({ error:e.message }); }
+    res.json({ access_token: signInData.access_token, user: { id: signInData.user.id, email: signInData.user.email, username } });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Auth: sign in ─────────────────────────────────────────────
