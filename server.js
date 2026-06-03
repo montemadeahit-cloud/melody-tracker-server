@@ -500,3 +500,10 @@ app.post("/rescan", async (req, res) => {
 });
 
 app.listen(port, "0.0.0.0", () => console.log(`Server listening on 0.0.0.0:${port}`));
+process.on('uncaughtException', function(err) {
+  console.error('Uncaught exception:', err.message, err.stack);
+});
+
+process.on('unhandledRejection', function(err) {
+  console.error('Unhandled rejection:', err);
+});
