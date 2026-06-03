@@ -27,7 +27,23 @@ const RESEND_KEY       = process.env.RESEND_API_KEY;
 const FROM_EMAIL       = process.env.FROM_EMAIL || "alerts@trackmyplacements.com";
 const RESCAN_SECRET    = process.env.RESCAN_SECRET || "rescan-secret";
 
-// ── Supabase helpers ──────────────────────────────────────────
+app.use(express.json());
+
+// ── Stripe helpers ────────────────────────────────────────────
+async function stripeRequest(path, method = "GET", body = null) {
+  const opts = {
+    method,
+    headers: {
+      "Authorization": `Bearer ${STRIPE_SECRET}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+  };
+  if (body) opts.body = new URLSearchParams(body).toString();
+  const r = await fetch(`https://api.stripe.com/v1${path}`, opts);
+  return r.json();
+}
+
+
 async function sbInsert(table, row) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
     method: "POST",
@@ -405,5 +421,75 @@ app.get("/profile/:user_id", async (req, res) => {
   }
 });
 
-app.listen(port, "0.0.0.0", () => console.log(`Server listening on 0.0.0.0:${port}`));
+// ── Create Stripe checkout session ───────────────────────────
+app.post("/subscribe", async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ error:"Missing user_id." });
 
+    // Get user email
+    const userRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${user_id}`, {
+      headers:{ "apikey":SUPABASE_SERVICE, "Authorization":`Bearer ${SUPABASE_SERVICE}` },
+    });
+    const userData = await userRes.json();
+    const email    = userData?.email;
+    if (!email) return res.status(400).json({ error:"User not found." });
+
+    // Get or create Stripe customer
+    const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
+    const profile  = profiles?.[0];
+    let customerId = profile?.stripe_customer_id;
+
+    if (!customerId) {
+      const customer = await stripeRequest("/customers", "POST", { email, metadata: { user_id } });
+      customerId = customer.id;
+      await sbUpdate("profiles", `id=eq.${user_id}`, { stripe_customer_id: customerId });
+    }
+
+    // Create checkout session with 7-day trial
+    const session = await stripeRequest("/checkout/sessions", "POST", {
+      customer: customerId,
+      mode: "subscription",
+      "line_items[0][price]": STRIPE_PRICE_ID,
+      "line_items[0][quantity]": "1",
+      "subscription_data[trial_period_days]": "7",
+      success_url: `${APP_URL}?subscribed=true`,
+      cancel_url:  `${APP_URL}?cancelled=true`,
+    });
+
+    if (session.error) return res.status(400).json({ error: session.error.message });
+    res.json({ url: session.url });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Check subscription status ─────────────────────────────────
+app.get("/subscription/:user_id", async (req, res) => {
+  try {
+    const profiles = await sbSelect("profiles", `id=eq.${req.params.user_id}`);
+    const profile  = profiles?.[0];
+    if (!profile) return res.status(404).json({ error:"Profile not found." });
+
+    const trialStart  = profile.trial_start ? new Date(profile.trial_start) : new Date();
+    const trialEnd    = new Date(trialStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const now         = new Date();
+    const trialActive = now < trialEnd;
+    const daysLeft    = Math.max(0, Math.ceil((trialEnd - now) / (1000 * 60 * 60 * 24)));
+
+    // Check Stripe subscription if customer exists
+    let subscriptionActive = false;
+    if (profile.stripe_customer_id && STRIPE_SECRET) {
+      const subs = await stripeRequest(`/subscriptions?customer=${profile.stripe_customer_id}&status=active`);
+      subscriptionActive = Array.isArray(subs.data) && subs.data.length > 0;
+    }
+
+    const hasAccess = trialActive || subscriptionActive;
+
+    res.json({ hasAccess, trialActive, subscriptionActive, daysLeft, trialEnd: trialEnd.toISOString() });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.listen(port, "0.0.0.0", () => console.log(`Server listening on 0.0.0.0:${port}`));
