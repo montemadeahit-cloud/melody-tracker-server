@@ -243,6 +243,25 @@ app.post("/scan", upload.single("file"), async (req, res) => {
 
     const { user_id } = req.body;
 
+    // Check access — trial or subscription required
+    if (user_id && SUPABASE_URL) {
+      const profiles    = await sbSelect("profiles", `id=eq.${user_id}`);
+      const profile     = profiles?.[0];
+      const trialStart  = profile?.trial_start ? new Date(profile.trial_start) : new Date();
+      const trialEnd    = new Date(trialStart.getTime() + 3 * 24 * 60 * 60 * 1000);
+      const trialActive = new Date() < trialEnd;
+
+      let subscriptionActive = false;
+      if (profile?.stripe_customer_id) {
+        const subs = await stripeRequest(`/subscriptions?customer=${profile.stripe_customer_id}&status=active`);
+        subscriptionActive = Array.isArray(subs.data) && subs.data.length > 0;
+      }
+
+      if (!trialActive && !subscriptionActive) {
+        return res.status(403).json({ error: "Your free trial has ended. Subscribe to continue scanning." });
+      }
+    }
+
     // Check for duplicate filename
     if (user_id && SUPABASE_URL) {
       const existing = await sbSelect("beats", `user_id=eq.${user_id}&filename=eq.${encodeURIComponent(req.file.originalname)}`);
