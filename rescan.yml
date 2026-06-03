@@ -1,0 +1,15 @@
+name: Daily Rescan
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  rescan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger rescan
+        run: |
+          curl -X POST https://elegant-youthfulness-production-06ce.up.railway.app/rescan \
+          -H "x-rescan-secret: ${{ secrets.RESCAN_SECRET }}"
