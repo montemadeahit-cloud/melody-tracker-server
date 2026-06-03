@@ -34,7 +34,7 @@ async function stripeRequest(path, method = "GET", body = null) {
   const opts = {
     method,
     headers: {
-      "Authorization": `Bearer ${STRIPE_SECRET}`,
+      "Authorization": `Bearer ${STRIPE_SECRET_KEY}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
   };
@@ -252,10 +252,10 @@ app.post("/scan", upload.single("file"), async (req, res) => {
       const trialActive = new Date() < trialEnd;
 
       let subscriptionActive = false;
-      if (profile?.stripe_customer_id) {
-        const subs = await stripeRequest(`/subscriptions?customer=${profile.stripe_customer_id}&status=active`);
-        subscriptionActive = Array.isArray(subs.data) && subs.data.length > 0;
-      }
+    if (profile?.stripe_customer_id && STRIPE_SECRET_KEY) {
+      const subs = await stripeRequest(`/subscriptions?customer=${profile.stripe_customer_id}&status=active`);
+      subscriptionActive = Array.isArray(subs.data) && subs.data.length > 0;
+    }
 
       if (!trialActive && !subscriptionActive) {
         return res.status(403).json({ error: "Your free trial has ended. Subscribe to continue scanning." });
