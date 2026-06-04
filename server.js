@@ -305,12 +305,12 @@ app.post("/auth/signup", async (req, res) => {
       sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(username)).catch(console.error);
     }
 
-    if (accessToken) return res.json({ access_token:accessToken, user:{ id:userId, email:authData.user.email, username } });
+    if (accessToken) return res.json({ access_token:accessToken, user:{ id:userId, email:authData.user?.email||email, username } });
 
     const siRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email, password }) });
     const siData = await siRes.json();
     if (siData.error) return res.status(400).json({ error:"Account created! Please sign in." });
-    res.json({ access_token:siData.access_token, user:{ id:siData.user.id, email:siData.user.email, username } });
+    res.json({ access_token:siData.access_token, user:{ id:siData.user?.id||userId, email:siData.user?.email||email, username } });
   } catch(e) { console.error("Signup error:",e.message); res.status(500).json({ error:e.message }); }
 });
 
@@ -331,7 +331,9 @@ app.post("/auth/signin", async (req, res) => {
     const siRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email:userData.email, password }) });
     const siData = await siRes.json();
     if (siData.error||siData.error_description) return res.status(400).json({ error:siData.error_description||siData.error?.message||"Sign in failed." });
-    res.json({ access_token:siData.access_token, user:{ id:siData.user.id, email:siData.user.email, username:profile.username } });
+    const userId = siData.user?.id || profile.id;
+    const userEmail = siData.user?.email || userData.email;
+    res.json({ access_token:siData.access_token, user:{ id:userId, email:userEmail, username:profile.username } });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
