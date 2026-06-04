@@ -443,10 +443,31 @@ app.post("/subscribe", async (req, res) => {
       if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { stripe_customer_id:customerId });
     }
 
+    // If already subscribed, upgrade/downgrade by modifying the existing subscription
+    if (profile?.subscription_status === "active" && customerId) {
+      const subs = await stripeRequest(`/subscriptions?customer=${customerId}&status=active`);
+      if (subs.data?.length > 0) {
+        const sub = subs.data[0];
+        const itemId = sub.items?.data?.[0]?.id;
+        if (itemId) {
+          const updated = await stripeRequest(`/subscriptions/${sub.id}`, "POST", {
+            "items[0][id]": itemId,
+            "items[0][price]": priceId,
+            "metadata[user_id]": user_id,
+            "metadata[tier]": tier || "tier1",
+            proration_behavior: "always_invoice",
+          });
+          if (updated.error) return res.status(400).json({ error: updated.error.message });
+          // Update profile immediately
+          await sbUpdate("profiles", `id=eq.${user_id}`, { tier: tier || "tier1" });
+          return res.json({ success: true, upgraded: true });
+        }
+      }
+    }
+
     const session = await stripeRequest("/checkout/sessions","POST",{
       customer:customerId, mode:"subscription",
       "line_items[0][price]":priceId, "line_items[0][quantity]":"1",
-      // Put user_id in BOTH session metadata and subscription metadata — belt and suspenders
       "metadata[user_id]":user_id, "metadata[tier]":tier||"tier1",
       "subscription_data[metadata][user_id]":user_id, "subscription_data[metadata][tier]":tier||"tier1",
       success_url:`${APP_URL}?subscribed=true`, cancel_url:`${APP_URL}?cancelled=true`,
