@@ -404,29 +404,27 @@ app.post("/scan", upload.single("file"), async (req, res) => {
 
     if (user_id && SUPABASE_URL) {
       try {
-        // Apply same quality filters as frontend — must pass all to count as a real placement
-        const BAD_TITLES   = ["unknown","untitled","","no title","n/a","na","null","undefined"];
-        const BAD_ARTISTS  = ["unknown","unknown artist","","n/a","na","null","undefined"];
+        // Quality filter — only block truly garbage results, allow missing artist
+        const BAD_TITLES = ["unknown","untitled","","no title","n/a","na","null","undefined"];
         function isGoodMatch(m) {
           if (!m) return false;
-          const score  = m.score || 100;
-          if (score < 96) return false;
-          const title  = (m.title || "").toLowerCase().trim();
-          const artist = (m.artists ? m.artists.map(a=>a.name).join(", ") : "").toLowerCase().trim();
+          const score = m.score || 100;
+          if (score < 90) return false;
+          const title = (m.title || "").toLowerCase().trim();
           if (BAD_TITLES.includes(title)) return false;
-          if (BAD_ARTISTS.includes(artist)) return false;
-          if (title.includes("unknown") && title.length < 12) return false;
           if (title.includes("untitled")) return false;
           return true;
         }
-        const rawMatched  = acrData?.status?.code === 0;
-        const musicList   = acrData?.metadata?.music || [];
-        const goodMatch   = rawMatched && musicList.length > 0 && isGoodMatch(musicList[0]);
-        const matched     = goodMatch;
-        const title       = matched ? musicList[0]?.title : null;
-        const artist      = matched ? musicList[0]?.artists?.[0]?.name : null;
-        const spotifyId   = matched ? musicList[0]?.external_metadata?.spotify?.track?.id : null;
-        const youtubeId   = matched ? musicList[0]?.external_metadata?.youtube?.vid : null;
+        const rawMatched = acrData?.status?.code === 0;
+        const musicList  = acrData?.metadata?.music || [];
+        // Check all results, not just first — take first good one
+        const goodMusic  = rawMatched ? musicList.filter(isGoodMatch) : [];
+        const matched    = goodMusic.length > 0;
+        const bestMatch  = matched ? goodMusic[0] : null;
+        const title      = bestMatch?.title || null;
+        const artist     = bestMatch?.artists?.[0]?.name || null;
+        const spotifyId  = bestMatch?.external_metadata?.spotify?.track?.id || null;
+        const youtubeId  = bestMatch?.external_metadata?.youtube?.vid || null;
         const storagePath = `${user_id}/${req.file.originalname}`;
 
         await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
@@ -703,22 +701,20 @@ app.post("/rescan", async (req, res) => {
         const scanMusic  = acrData?.metadata?.music || [];
         function isGoodRescanMatch(m) {
           if (!m) return false;
-          if ((m.score||100) < 96) return false;
+          if ((m.score||100) < 90) return false;
           const t = (m.title||"").toLowerCase().trim();
-          const a = (m.artists?m.artists.map(x=>x.name).join(", "):"").toLowerCase().trim();
           const badT = ["unknown","untitled","","no title","n/a","na","null","undefined"];
-          const badA = ["unknown","unknown artist","","n/a","na","null","undefined"];
-          if (badT.includes(t)||badA.includes(a)) return false;
-          if (t.includes("unknown")&&t.length<12) return false;
-          if (t.includes("untitled")) return false;
+          if (badT.includes(t)||t.includes("untitled")) return false;
           return true;
         }
-        const matched = rawMatched && scanMusic.length > 0 && isGoodRescanMatch(scanMusic[0]);
+        const goodRescanMusic = rawMatched ? scanMusic.filter(isGoodRescanMatch) : [];
+        const matched = goodRescanMusic.length > 0;
+        const bestRescan = matched ? goodRescanMusic[0] : null;
         if (matched) {
-          const title=acrData?.metadata?.music?.[0]?.title;
-          const artist=acrData?.metadata?.music?.[0]?.artists?.[0]?.name;
-          const spotifyId=acrData?.metadata?.music?.[0]?.external_metadata?.spotify?.track?.id;
-          const youtubeId=acrData?.metadata?.music?.[0]?.external_metadata?.youtube?.vid;
+          const title     = bestRescan?.title;
+          const artist    = bestRescan?.artists?.[0]?.name;
+          const spotifyId = bestRescan?.external_metadata?.spotify?.track?.id;
+          const youtubeId = bestRescan?.external_metadata?.youtube?.vid;
           if (title!==beat.last_result) {
             await sbUpdate("beats",`id=eq.${beat.id}`,{ status:"placed", last_scanned:new Date().toISOString(), last_result:title, last_artist:artist||null, spotify_id:spotifyId||null, youtube_id:youtubeId||null });
             const canEmail=RESEND_KEY&&(status.emailMonitorLimit===null||(status.emailMonitorLimit>0&&status.emailMonitorsUsed<status.emailMonitorLimit));
