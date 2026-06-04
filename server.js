@@ -456,26 +456,13 @@ app.post("/subscribe", async (req, res) => {
       if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { stripe_customer_id:customerId });
     }
 
-    // If already subscribed, upgrade/downgrade by modifying the existing subscription
+    // If already subscribed, send them to Stripe billing portal to upgrade safely
     if (profile?.subscription_status === "active" && customerId) {
-      const subs = await stripeRequest(`/subscriptions?customer=${customerId}&status=active`);
-      if (subs.data?.length > 0) {
-        const sub = subs.data[0];
-        const itemId = sub.items?.data?.[0]?.id;
-        if (itemId) {
-          const updated = await stripeRequest(`/subscriptions/${sub.id}`, "POST", {
-            "items[0][id]": itemId,
-            "items[0][price]": priceId,
-            "metadata[user_id]": user_id,
-            "metadata[tier]": tier || "tier1",
-            proration_behavior: "always_invoice",
-          });
-          if (updated.error) return res.status(400).json({ error: updated.error.message });
-          // Update profile immediately
-          await sbUpdate("profiles", `id=eq.${user_id}`, { tier: tier || "tier1" });
-          return res.json({ success: true, upgraded: true });
-        }
-      }
+      const portal = await stripeRequest("/billing_portal/sessions", "POST", {
+        customer: customerId,
+        return_url: `${APP_URL}?subscribed=true`,
+      });
+      if (portal.url) return res.json({ url: portal.url });
     }
 
     const session = await stripeRequest("/checkout/sessions","POST",{
