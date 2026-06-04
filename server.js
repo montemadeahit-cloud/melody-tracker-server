@@ -70,7 +70,10 @@ async function sbInsert(table, row) {
 async function sbSelect(table, filter) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
     headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`},
-  }); return r.json();
+  });
+  const text = await r.text();
+  if (!text || !text.trim()) { console.error("sbSelect empty response:", r.status, table, filter); return []; }
+  try { return JSON.parse(text); } catch(e) { console.error("sbSelect parse error:", table, r.status, text.slice(0,200)); return []; }
 }
 async function sbUpdate(table, filter, row) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
@@ -213,7 +216,21 @@ async function getSubscriptionStatus(user_id) {
 }
 
 // ── Health ────────────────────────────────────────────────────
-app.get("/", (req, res) => res.json({ status:"ok", acrHost:ACR_HOST||"MISSING", keySet:!!ACR_KEY, secretSet:!!ACR_SECRET, supabase:!!SUPABASE_URL, stripe:!!STRIPE_KEY }));
+app.get("/", (req, res) => res.json({
+  status:"ok",
+  acrHost:ACR_HOST||"MISSING",
+  keySet:!!ACR_KEY,
+  secretSet:!!ACR_SECRET,
+  supabaseUrl:!!SUPABASE_URL,
+  supabaseKey:!!SUPABASE_KEY,
+  supabaseService:!!SUPABASE_SERVICE,
+  stripe:!!STRIPE_KEY,
+  stripePriceT1:!!STRIPE_PRICE_T1,
+  stripePriceT2:!!STRIPE_PRICE_T2,
+  stripeWebhook:!!STRIPE_WEBHOOK,
+  resend:!!RESEND_KEY,
+  appUrl:APP_URL,
+}));
 
 // ── Auth: sign up ─────────────────────────────────────────────
 app.post("/auth/signup", async (req, res) => {
