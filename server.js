@@ -50,16 +50,21 @@ function getIP(req) {
     || "unknown";
 }
 
-// In-memory rate limiter — max 3 signups per IP per hour
+// In-memory rate limiter — max 5 signups per IP per hour
 const signupAttempts = new Map();
 function checkSignupRate(ip) {
-  const now = Date.now(), window = 60*60*1000, max = 3;
+  const now = Date.now(), window = 60*60*1000, max = 5;
   const entry = signupAttempts.get(ip);
   if (!entry || now - entry.firstAt > window) { signupAttempts.set(ip, { count:1, firstAt:now }); return true; }
   if (entry.count >= max) return false;
   entry.count++;
   return true;
 }
+// Clear rate limit for an IP (call this if you get locked out during testing)
+app.get("/admin/reset-ratelimit", (req, res) => {
+  signupAttempts.clear();
+  res.json({ cleared: true });
+});
 
 // ── Supabase helpers ──────────────────────────────────────────
 async function sbInsert(table, row) {
@@ -264,9 +269,17 @@ app.post("/auth/signup", async (req, res) => {
       method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email, password }),
     });
     const authData = await authRes.json();
+    console.log("Signup response status:", authRes.status, "user:", authData.user?.id, "error:", authData.error?.message);
+
     if (authData.error) return res.status(400).json({ error:authData.error.message||authData.error });
-    const userId = authData.user?.id, accessToken = authData.access_token;
-    if (!userId) return res.status(400).json({ error:"Could not create account." });
+
+    const userId      = authData.user?.id;
+    const accessToken = authData.access_token;
+
+    if (!userId) {
+      console.error("Signup returned no user ID:", JSON.stringify(authData).slice(0,400));
+      return res.status(400).json({ error:"Account could not be created. This email may already be registered — try signing in instead." });
+    }
 
     await sbInsert("profiles", { id:userId, username, trial_start:new Date().toISOString(), tier:"trial", submissions_used:0, email_monitors_used:0, submissions_reset_at:new Date().toISOString(), signup_ip:ip });
 
