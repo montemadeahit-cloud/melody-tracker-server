@@ -65,7 +65,10 @@ function checkSignupRate(ip) {
 async function sbInsert(table, row) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
     method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Prefer":"return=representation"}, body:JSON.stringify(row),
-  }); return r.json();
+  });
+  const text = await r.text();
+  if (!text || !text.trim()) return null;
+  try { return JSON.parse(text); } catch(e) { console.error("sbInsert parse error:", table, r.status, text.slice(0,200)); return null; }
 }
 async function sbSelect(table, filter) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
@@ -78,7 +81,10 @@ async function sbSelect(table, filter) {
 async function sbUpdate(table, filter, row) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
     method:"PATCH", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`}, body:JSON.stringify(row),
-  }); return r.json();
+  });
+  const text = await r.text();
+  if (!text || !text.trim()) return null;
+  try { return JSON.parse(text); } catch(e) { return null; }
 }
 async function sbDelete(table, filter) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
