@@ -247,7 +247,10 @@ app.post("/auth/signup", async (req, res) => {
 
     await sbInsert("profiles", { id:userId, username, trial_start:new Date().toISOString(), tier:"trial", submissions_used:0, email_monitors_used:0, submissions_reset_at:new Date().toISOString(), signup_ip:ip });
 
-    if (RESEND_KEY) sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(username)).catch(console.error);
+    // Send branded welcome email (non-blocking)
+    if (RESEND_KEY) {
+      sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(username)).catch(console.error);
+    }
 
     if (accessToken) return res.json({ access_token:accessToken, user:{ id:userId, email:authData.user.email, username } });
 
@@ -282,22 +285,32 @@ app.post("/auth/forgot-password", async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error:"Email required." });
 
-    if (RESEND_KEY && SUPABASE_SERVICE) {
-      try {
-        const linkRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/generate_link`, {
-          method:"POST",
-          headers:{"Content-Type":"application/json","apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
-          body:JSON.stringify({ type:"recovery", email }),
-        });
-        const linkData = await linkRes.json();
-        if (linkData.action_link) {
-          await sendEmail(email, "Reset your TrackMyPlacements password", passwordResetEmailHtml(linkData.action_link));
-        }
-      } catch(e) { console.error("Reset link error:",e.message); }
+    // Generate a password reset link via Supabase admin API
+    const linkRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/generate_link`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json","apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
+      body:JSON.stringify({ type:"recovery", email, options:{ redirectTo:`${APP_URL}?type=recovery` } }),
+    });
+    const linkData = await linkRes.json();
+    console.log("Reset link response:", JSON.stringify(linkData));
+
+    if (linkData.action_link && RESEND_KEY) {
+      await sendEmail(email, "Reset your TrackMyPlacements password", passwordResetEmailHtml(linkData.action_link));
+    } else if (!linkData.action_link) {
+      // Fallback: trigger Supabase's built-in recovery email
+      await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+        method:"POST",
+        headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY},
+        body:JSON.stringify({ email }),
+      });
     }
-    // Always succeed — don't leak whether email exists
+
+    // Always return success — never leak whether email exists
     res.json({ success:true });
-  } catch(e) { res.status(500).json({ error:e.message }); }
+  } catch(e) {
+    console.error("Forgot password error:", e.message);
+    res.status(500).json({ error:e.message });
+  }
 });
 
 // ── Auth: reset password ──────────────────────────────────────
