@@ -433,13 +433,16 @@ app.delete("/beats/:beat_id", async (req, res) => {
 app.post("/subscribe", async (req, res) => {
   try {
     const { user_id, tier } = req.body;
+    console.log("Subscribe request:", user_id, tier);
     if (!user_id) return res.status(400).json({ error:"Missing user_id." });
     if (!STRIPE_KEY) return res.status(500).json({ error:"Stripe not configured." });
     const priceId = tier==="tier2" ? STRIPE_PRICE_T2 : STRIPE_PRICE_T1;
-    if (!priceId) return res.status(500).json({ error:"Price not configured." });
+    console.log("Price ID:", priceId, "T1:", STRIPE_PRICE_T1, "T2:", STRIPE_PRICE_T2);
+    if (!priceId) return res.status(500).json({ error:"Price ID not configured. Check STRIPE_PRICE_ID env var." });
 
     const uRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${user_id}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
     const uData = await uRes.json();
+    console.log("User email:", uData?.email);
     if (!uData?.email) return res.status(400).json({ error:"User not found." });
 
     let profile = null;
@@ -448,23 +451,31 @@ app.post("/subscribe", async (req, res) => {
       if (Array.isArray(ps)&&ps.length>0&&ps[0].id) { profile=ps[0]; break; }
       await new Promise(r=>setTimeout(r,500));
     }
+    console.log("Profile:", profile?.id, "customer:", profile?.stripe_customer_id, "status:", profile?.subscription_status);
 
     let customerId = profile?.stripe_customer_id;
     if (!customerId) {
+      console.log("Creating new Stripe customer for", uData.email);
       const cust = await stripeRequest("/customers","POST",{ email:uData.email, "metadata[user_id]":user_id });
+      console.log("Customer created:", cust.id, cust.error);
+      if (cust.error) return res.status(400).json({ error:"Could not create customer: "+cust.error.message });
       customerId = cust.id;
       if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { stripe_customer_id:customerId });
     }
 
-    // If already subscribed, send them to Stripe billing portal to upgrade safely
+    // If already subscribed, send to Stripe billing portal to upgrade safely
     if (profile?.subscription_status === "active" && customerId) {
+      console.log("Active sub found, redirecting to billing portal");
       const portal = await stripeRequest("/billing_portal/sessions", "POST", {
         customer: customerId,
         return_url: `${APP_URL}?subscribed=true`,
       });
+      console.log("Portal:", portal.url, portal.error);
       if (portal.url) return res.json({ url: portal.url });
+      if (portal.error) return res.status(400).json({ error: portal.error.message });
     }
 
+    console.log("Creating checkout session for customer:", customerId, "price:", priceId);
     const session = await stripeRequest("/checkout/sessions","POST",{
       customer:customerId, mode:"subscription",
       "line_items[0][price]":priceId, "line_items[0][quantity]":"1",
@@ -472,15 +483,18 @@ app.post("/subscribe", async (req, res) => {
       "subscription_data[metadata][user_id]":user_id, "subscription_data[metadata][tier]":tier||"tier1",
       success_url:`${APP_URL}?subscribed=true`, cancel_url:`${APP_URL}?cancelled=true`,
     });
+    console.log("Session:", session.url, session.error);
     if (session.error) return res.status(400).json({ error:session.error.message });
 
-    // Always persist customer ID so webhook fallback lookup works
     if (profile && customerId) {
       await sbUpdate("profiles", `id=eq.${user_id}`, { stripe_customer_id:customerId });
     }
 
     res.json({ url:session.url });
-  } catch(e) { res.status(500).json({ error:e.message }); }
+  } catch(e) {
+    console.error("Subscribe error:", e.message, e.stack);
+    res.status(500).json({ error:e.message });
+  }
 });
 
 // ── Subscription status ───────────────────────────────────────
