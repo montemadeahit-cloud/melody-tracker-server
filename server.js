@@ -114,15 +114,30 @@ async function storageDelete(path) {
   }); return r.ok;
 }
 
+// ── Audio fingerprint hash ────────────────────────────────────
+// Creates a unique content-based ID from the audio file itself
+// This is stored permanently so the beat can be identified in future
+function computeAudioHash(buffer) {
+  // SHA-256 of the raw audio bytes — unique per file content
+  const hash = crypto.createHash("sha256").update(buffer).digest("hex");
+  // Prefix with TMP- to make it clearly a TrackMyPlacements fingerprint ID
+  return "TMP-" + hash.slice(0, 32).toUpperCase();
+}
+
 // ── ACRCloud ──────────────────────────────────────────────────
 async function identify(buffer, filename, mimetype) {
   const timestamp = Math.floor(Date.now()/1000);
   const sig = crypto.createHmac("sha1",ACR_SECRET).update(`POST\n/v1/identify\n${ACR_KEY}\naudio\n1\n${timestamp}`).digest("base64");
   const form = new FormData();
   form.append("sample",buffer,{filename,contentType:mimetype});
-  form.append("access_key",ACR_KEY); form.append("data_type","audio");
-  form.append("signature_version","1"); form.append("signature",sig);
-  form.append("sample_bytes",buffer.length.toString()); form.append("timestamp",timestamp.toString());
+  form.append("access_key",ACR_KEY);
+  form.append("data_type","audio");
+  form.append("signature_version","1");
+  form.append("signature",sig);
+  form.append("sample_bytes",buffer.length.toString());
+  form.append("timestamp",timestamp.toString());
+  // Request additional metadata: BPM, key, beats, genre
+  form.append("return","music,beats,genre,bpm,key");
   const res = await fetch(`https://${ACR_HOST}/v1/identify`,{method:"POST",body:form});
   return res.json();
 }
@@ -404,6 +419,18 @@ app.post("/scan", upload.single("file"), async (req, res) => {
     const acrData = await identify(req.file.buffer, req.file.originalname, req.file.mimetype);
     console.log("ACRCloud:", JSON.stringify(acrData));
 
+    // Compute audio fingerprint hash from file content — always, regardless of match result
+    const audioHash     = computeAudioHash(req.file.buffer);
+    const fingerprintId = audioHash; // TMP-{32 char hex} — permanent unique ID for this beat
+
+    // Extract BPM, key, duration from ACRCloud response if available
+    const metadata  = acrData?.metadata || {};
+    const bpm       = metadata.beats?.bpm || metadata.music?.[0]?.bpm || null;
+    const audioKey  = metadata.music?.[0]?.key?.note
+      ? (metadata.music[0].key.note + (metadata.music[0].key.scale ? " " + metadata.music[0].key.scale : ""))
+      : null;
+    const durationMs = metadata.music?.[0]?.duration_ms || null;
+
     if (user_id && SUPABASE_URL) {
       try {
         // Quality filter — only block truly garbage results, allow missing artist
@@ -419,7 +446,6 @@ app.post("/scan", upload.single("file"), async (req, res) => {
         }
         const rawMatched = acrData?.status?.code === 0;
         const musicList  = acrData?.metadata?.music || [];
-        // Check all results, not just first — take first good one
         const goodMusic  = rawMatched ? musicList.filter(isGoodMatch) : [];
         const matched    = goodMusic.length > 0;
         const bestMatch  = matched ? goodMusic[0] : null;
@@ -430,7 +456,23 @@ app.post("/scan", upload.single("file"), async (req, res) => {
         const storagePath = `${user_id}/${req.file.originalname}`;
 
         await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
-        await sbInsert("beats", { user_id, filename:req.file.originalname, storage_path:storagePath, status:matched?"placed":"monitoring", last_scanned:new Date().toISOString(), last_result:title, last_artist:artist||null, spotify_id:spotifyId||null, youtube_id:youtubeId||null, uploaded_at:new Date().toISOString() });
+        await sbInsert("beats", {
+          user_id,
+          filename:       req.file.originalname,
+          storage_path:   storagePath,
+          status:         matched ? "placed" : "monitoring",
+          last_scanned:   new Date().toISOString(),
+          last_result:    title,
+          last_artist:    artist || null,
+          spotify_id:     spotifyId || null,
+          youtube_id:     youtubeId || null,
+          uploaded_at:    new Date().toISOString(),
+          fingerprint_id: fingerprintId,
+          audio_hash:     audioHash,
+          bpm:            bpm || null,
+          audio_key:      audioKey || null,
+          duration_ms:    durationMs || null,
+        });
 
         // Increment submission counter
         const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
@@ -452,7 +494,9 @@ app.post("/scan", upload.single("file"), async (req, res) => {
         }
       } catch(dbErr) { console.error("Post-scan error (non-fatal):",dbErr.message); }
     }
-    res.json(acrData);
+
+    // Return ACR data with fingerprint ID appended so frontend can display it
+    res.json({ ...acrData, fingerprint_id: fingerprintId, bpm, audio_key: audioKey });
   } catch(err) { console.error("Scan error:",err.message); res.status(500).json({ error:"Scan failed: "+err.message }); }
 });
 
@@ -482,6 +526,25 @@ app.delete("/beats/:beat_id", async (req, res) => {
     const beats = await sbSelect("beats", `id=eq.${req.params.beat_id}`);
     if (Array.isArray(beats)&&beats.length>0&&beats[0].storage_path) await storageDelete(beats[0].storage_path);
     res.json({ success: await sbDelete("beats", `id=eq.${req.params.beat_id}`) });
+  } catch(err) { res.status(500).json({ error:err.message }); }
+});
+
+// ── Get beat fingerprint ──────────────────────────────────────
+app.get("/beats/:beat_id/fingerprint", async (req, res) => {
+  try {
+    const beats = await sbSelect("beats", `id=eq.${req.params.beat_id}`);
+    const beat  = beats?.[0];
+    if (!beat) return res.status(404).json({ error:"Beat not found." });
+    res.json({
+      fingerprint_id: beat.fingerprint_id || null,
+      audio_hash:     beat.audio_hash || null,
+      bpm:            beat.bpm || null,
+      audio_key:      beat.audio_key || null,
+      duration_ms:    beat.duration_ms || null,
+      filename:       beat.filename,
+      uploaded_at:    beat.uploaded_at,
+      status:         beat.status,
+    });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
