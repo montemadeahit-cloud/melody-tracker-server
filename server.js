@@ -361,7 +361,7 @@ app.post("/scan", upload.single("file"), async (req, res) => {
         const storagePath = `${user_id}/${req.file.originalname}`;
 
         await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
-        await sbInsert("beats", { user_id, filename:req.file.originalname, storage_path:storagePath, status:matched?"placed":"monitoring", last_scanned:new Date().toISOString(), last_result:title, uploaded_at:new Date().toISOString() });
+        await sbInsert("beats", { user_id, filename:req.file.originalname, storage_path:storagePath, status:matched?"placed":"monitoring", last_scanned:new Date().toISOString(), last_result:title, last_artist:artist||null, spotify_id:spotifyId||null, youtube_id:youtubeId||null, uploaded_at:new Date().toISOString() });
 
         // Increment submission counter
         const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
@@ -608,7 +608,7 @@ app.post("/rescan", async (req, res) => {
           const spotifyId=acrData?.metadata?.music?.[0]?.external_metadata?.spotify?.track?.id;
           const youtubeId=acrData?.metadata?.music?.[0]?.external_metadata?.youtube?.vid;
           if (title!==beat.last_result) {
-            await sbUpdate("beats",`id=eq.${beat.id}`,{ status:"placed", last_scanned:new Date().toISOString(), last_result:title });
+            await sbUpdate("beats",`id=eq.${beat.id}`,{ status:"placed", last_scanned:new Date().toISOString(), last_result:title, last_artist:artist||null, spotify_id:spotifyId||null, youtube_id:youtubeId||null });
             const canEmail=RESEND_KEY&&(status.emailMonitorLimit===null||(status.emailMonitorLimit>0&&status.emailMonitorsUsed<status.emailMonitorLimit));
             if (canEmail) {
               const uRes=await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${beat.user_id}`,{headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`}});
