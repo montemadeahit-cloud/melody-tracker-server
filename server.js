@@ -622,9 +622,18 @@ app.post("/webhook", async (req, res) => {
       const s = event.data.object;
       const { userId, tier } = await resolveUser(s);
       if (userId) {
-        if (s.status==="active") { await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"active", tier }); console.log("Sub active:",userId,tier); }
-        if (s.status==="past_due") { await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"past_due" }); console.log("Past due:",userId); }
-      } else { console.error("subscription event — could not resolve user. customer:", s.customer); }
+        // Only update to active — never mark past_due from subscription events
+        // past_due is handled exclusively by invoice.payment_failed
+        if (s.status==="active") {
+          await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"active", tier });
+          console.log("Sub active:",userId,tier);
+        }
+        // cancelled/unpaid — cut off access
+        if (s.status==="canceled"||s.status==="unpaid") {
+          await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"cancelled", tier:"trial" });
+          console.log("Sub cancelled/unpaid:",userId);
+        }
+      }
     }
 
     if (event.type==="customer.subscription.deleted") {
@@ -634,11 +643,20 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (event.type==="invoice.payment_failed") {
-      const cid = event.data.object.customer;
-      if (cid) {
+      const invoice = event.data.object;
+      const cid = invoice.customer;
+      // Only mark past_due after multiple failed attempts (attempt_count > 1)
+      // First failure might be a temporary card issue — give them grace
+      const attemptCount = invoice.attempt_count || 1;
+      if (cid && attemptCount > 1) {
         const ps = await sbSelect("profiles",`stripe_customer_id=eq.${cid}`);
         const uid = ps?.[0]?.id;
-        if (uid) { await sbUpdate("profiles",`id=eq.${uid}`,{ subscription_status:"past_due" }); console.log("Payment failed, past_due:",uid); }
+        if (uid) {
+          await sbUpdate("profiles",`id=eq.${uid}`,{ subscription_status:"past_due" });
+          console.log("Payment failed x"+attemptCount+", past_due:",uid);
+        }
+      } else {
+        console.log("First payment failure, not marking past_due yet. attempt:", attemptCount);
       }
     }
     res.json({ received:true });
