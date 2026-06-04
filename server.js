@@ -428,10 +428,18 @@ app.post("/subscribe", async (req, res) => {
     const session = await stripeRequest("/checkout/sessions","POST",{
       customer:customerId, mode:"subscription",
       "line_items[0][price]":priceId, "line_items[0][quantity]":"1",
+      // Put user_id in BOTH session metadata and subscription metadata — belt and suspenders
+      "metadata[user_id]":user_id, "metadata[tier]":tier||"tier1",
       "subscription_data[metadata][user_id]":user_id, "subscription_data[metadata][tier]":tier||"tier1",
       success_url:`${APP_URL}?subscribed=true`, cancel_url:`${APP_URL}?cancelled=true`,
     });
     if (session.error) return res.status(400).json({ error:session.error.message });
+
+    // Always persist customer ID so webhook fallback lookup works
+    if (profile && customerId) {
+      await sbUpdate("profiles", `id=eq.${user_id}`, { stripe_customer_id:customerId });
+    }
+
     res.json({ url:session.url });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
@@ -470,26 +478,59 @@ app.post("/webhook", async (req, res) => {
     const event=JSON.parse(payload);
     console.log("Webhook:",event.type);
 
-    if (event.type==="checkout.session.completed") {
-      const s=event.data.object, userId=s.metadata?.user_id, tier=s.metadata?.tier||"tier1";
-      if (userId) { await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"active", tier, submissions_used:0, submissions_reset_at:new Date().toISOString(), email_monitors_used:0 }); console.log("Activated:",userId,tier); }
+    // Helper: resolve user_id and tier from any Stripe event object
+    async function resolveUser(obj) {
+      let userId = obj.metadata?.user_id;
+      let tier   = obj.metadata?.tier || "tier1";
+      // Fall back to customer ID lookup if metadata missing
+      if (!userId && obj.customer) {
+        const ps = await sbSelect("profiles", `stripe_customer_id=eq.${obj.customer}`);
+        userId = ps?.[0]?.id;
+      }
+      // Detect tier from price ID if not in metadata
+      const priceId = obj.items?.data?.[0]?.price?.id || obj.plan?.id;
+      if (priceId && priceId === STRIPE_PRICE_T2) tier = "tier2";
+      else if (priceId) tier = "tier1";
+      return { userId, tier };
     }
+
+    if (event.type==="checkout.session.completed") {
+      const s = event.data.object;
+      let { userId, tier } = await resolveUser(s);
+      // Also try fetching the subscription for its metadata if we still don't have user
+      if (!userId && s.subscription) {
+        try {
+          const sub = await stripeRequest(`/subscriptions/${s.subscription}`);
+          const resolved = await resolveUser(sub);
+          if (resolved.userId) { userId = resolved.userId; tier = resolved.tier; }
+        } catch(e) { console.error("Sub fetch error:", e.message); }
+      }
+      if (userId) {
+        await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"active", tier, submissions_used:0, submissions_reset_at:new Date().toISOString(), email_monitors_used:0 });
+        console.log("Activated:",userId,"tier:",tier);
+      } else { console.error("checkout.session.completed — could not resolve user. customer:", s.customer, "metadata:", JSON.stringify(s.metadata)); }
+    }
+
     if (event.type==="customer.subscription.created"||event.type==="customer.subscription.updated") {
-      const s=event.data.object, userId=s.metadata?.user_id, tier=s.metadata?.tier||"tier1";
+      const s = event.data.object;
+      const { userId, tier } = await resolveUser(s);
       if (userId) {
         if (s.status==="active") { await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"active", tier }); console.log("Sub active:",userId,tier); }
         if (s.status==="past_due") { await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"past_due" }); console.log("Past due:",userId); }
-      }
+      } else { console.error("subscription event — could not resolve user. customer:", s.customer); }
     }
+
     if (event.type==="customer.subscription.deleted") {
-      const s=event.data.object, userId=s.metadata?.user_id;
+      const s = event.data.object;
+      const { userId } = await resolveUser(s);
       if (userId) { await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"cancelled", tier:"trial" }); console.log("Cancelled:",userId); }
     }
+
     if (event.type==="invoice.payment_failed") {
-      const cid=event.data.object.customer;
+      const cid = event.data.object.customer;
       if (cid) {
-        const ps=await sbSelect("profiles",`stripe_customer_id=eq.${cid}`);
-        const uid=ps?.[0]?.id;
+        const ps = await sbSelect("profiles",`stripe_customer_id=eq.${cid}`);
+        const uid = ps?.[0]?.id;
         if (uid) { await sbUpdate("profiles",`id=eq.${uid}`,{ subscription_status:"past_due" }); console.log("Payment failed, past_due:",uid); }
       }
     }
@@ -560,4 +601,3 @@ app.post("/rescan", async (req, res) => {
 });
 
 app.listen(port, "0.0.0.0", ()=>console.log(`Server listening on 0.0.0.0:${port}`));
-
