@@ -410,7 +410,7 @@ app.post("/scan", upload.single("file"), async (req, res) => {
         function isGoodMatch(m) {
           if (!m) return false;
           const score  = m.score || 100;
-          if (score < 98) return false;
+          if (score < 96) return false;
           const title  = (m.title || "").toLowerCase().trim();
           const artist = (m.artists ? m.artists.map(a=>a.name).join(", ") : "").toLowerCase().trim();
           if (BAD_TITLES.includes(title)) return false;
@@ -703,7 +703,7 @@ app.post("/rescan", async (req, res) => {
         const scanMusic  = acrData?.metadata?.music || [];
         function isGoodRescanMatch(m) {
           if (!m) return false;
-          if ((m.score||100) < 98) return false;
+          if ((m.score||100) < 96) return false;
           const t = (m.title||"").toLowerCase().trim();
           const a = (m.artists?m.artists.map(x=>x.name).join(", "):"").toLowerCase().trim();
           const badT = ["unknown","untitled","","no title","n/a","na","null","undefined"];
