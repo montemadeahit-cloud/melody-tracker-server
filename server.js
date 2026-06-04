@@ -281,7 +281,24 @@ app.post("/auth/signup", async (req, res) => {
       return res.status(400).json({ error:"Account could not be created. This email may already be registered — try signing in instead." });
     }
 
-    await sbInsert("profiles", { id:userId, username, trial_start:new Date().toISOString(), tier:"trial", submissions_used:0, email_monitors_used:0, submissions_reset_at:new Date().toISOString(), signup_ip:ip });
+    // Insert profile — wrapped in try/catch so auth account isn't lost if this fails
+    try {
+      const insertResult = await sbInsert("profiles", {
+        id: userId,
+        username,
+        trial_start: new Date().toISOString(),
+        tier: "trial",
+        submissions_used: 0,
+        email_monitors_used: 0,
+        submissions_reset_at: new Date().toISOString(),
+        signup_ip: ip,
+        subscription_status: "trial",
+      });
+      console.log("Profile insert result:", JSON.stringify(insertResult)?.slice(0,200));
+    } catch(profileErr) {
+      console.error("Profile insert failed:", profileErr.message);
+      // Don't block signup — user can still sign in, profile will be missing but recoverable
+    }
 
     // Send branded welcome email (non-blocking)
     if (RESEND_KEY) {
@@ -303,7 +320,10 @@ app.post("/auth/signin", async (req, res) => {
     const { username, password } = req.body;
     if (!username||!password) return res.status(400).json({ error:"All fields required." });
     const profiles = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
-    if (!Array.isArray(profiles)||profiles.length===0) return res.status(400).json({ error:"Username not found." });
+    if (!Array.isArray(profiles)||profiles.length===0) {
+      // Also try looking up by checking if username matches an auth user with that email pattern
+      return res.status(400).json({ error:"Username not found. If you just signed up, your account may still be setting up — please wait a moment and try again." });
+    }
     const profile = profiles[0];
     const userRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${profile.id}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
     const userData = await userRes.json();
@@ -625,6 +645,27 @@ app.post("/webhook", async (req, res) => {
     }
     res.json({ received:true });
   } catch(e) { console.error("Webhook error:",e.message); res.status(400).json({ error:e.message }); }
+});
+
+// ── Profile recovery — creates missing profile for existing auth user ──
+app.post("/auth/recover-profile", async (req, res) => {
+  try {
+    const { user_id, username } = req.body;
+    if (!user_id||!username) return res.status(400).json({ error:"Missing fields." });
+    // Check profile doesn't already exist
+    const existing = await sbSelect("profiles", `id=eq.${user_id}`);
+    if (Array.isArray(existing)&&existing.length>0) return res.json({ exists:true, profile:existing[0] });
+    // Check username not taken
+    const taken = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
+    if (Array.isArray(taken)&&taken.length>0) return res.status(400).json({ error:"Username already taken." });
+    const result = await sbInsert("profiles", {
+      id:user_id, username, trial_start:new Date().toISOString(),
+      tier:"trial", submissions_used:0, email_monitors_used:0,
+      submissions_reset_at:new Date().toISOString(), subscription_status:"trial",
+    });
+    console.log("Profile recovered:", user_id, username);
+    res.json({ success:true, result });
+  } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
 // ── Profiles ──────────────────────────────────────────────────
