@@ -424,12 +424,20 @@ app.post("/scan", upload.single("file"), async (req, res) => {
     const fingerprintId = audioHash; // TMP-{32 char hex} — permanent unique ID for this beat
 
     // Extract BPM, key, duration from ACRCloud response if available
+    // Fall back to client-side detected values if ACRCloud didn't return them
+    const clientKey = req.body.client_key || null;
+    const clientBpm = req.body.client_bpm ? parseFloat(req.body.client_bpm) : null;
+
     const metadata  = acrData?.metadata || {};
-    const bpm       = metadata.beats?.bpm || metadata.music?.[0]?.bpm || null;
-    const audioKey  = metadata.music?.[0]?.key?.note
+    const acrBpm    = metadata.beats?.bpm || metadata.music?.[0]?.bpm || null;
+    const acrKey    = metadata.music?.[0]?.key?.note
       ? (metadata.music[0].key.note + (metadata.music[0].key.scale ? " " + metadata.music[0].key.scale : ""))
       : null;
     const durationMs = metadata.music?.[0]?.duration_ms || null;
+
+    // Use ACRCloud values when available, fall back to client-detected
+    const bpm      = acrBpm || clientBpm;
+    const audioKey = acrKey || clientKey;
 
     if (user_id && SUPABASE_URL) {
       try {
