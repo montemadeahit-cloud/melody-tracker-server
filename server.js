@@ -154,8 +154,15 @@ function normaliseAuddResult(r) {
 }
 
 // ── Merge results from all engines + all slices ───────────────
-// De-dupes by title (case-insensitive), keeps highest score per title,
-// marks the source engine on each result for debugging.
+// De-dupes by normalised title (strips feat/prod/remix suffixes),
+// keeps highest score per title across all engines and segments.
+function normaliseTitle(t) {
+  return (t || "")
+    .toLowerCase()
+    .replace(/\s*[\(\[].*(feat|ft|prod|remix|edit|version|remaster|explicit|clean|radio).*[\)\]]/gi, "")
+    .replace(/\s*-\s*(feat|ft|prod|remix|edit|version|remaster|explicit|clean|radio).*/gi, "")
+    .trim();
+}
 function mergeAllResults(responses) {
   const primary   = responses.find(r => r?.status?.code === 0) || responses[0] || {};
   const musicMap  = new Map();
@@ -163,13 +170,25 @@ function mergeAllResults(responses) {
 
   for (const r of responses) {
     for (const m of (r?.metadata?.music || [])) {
-      const key = (m.title || "").toLowerCase().trim();
+      const key = normaliseTitle(m.title);
       if (!key) continue;
       const existing = musicMap.get(key);
-      if (!existing || (m.score || 0) > (existing.score || 0)) musicMap.set(key, m);
+      // Keep highest score, but prefer the entry that has more DSP metadata
+      if (!existing) {
+        musicMap.set(key, m);
+      } else {
+        const existingDsp = (existing.external_metadata?.spotify?.track?.id ? 1 : 0) + (existing.external_metadata?.youtube?.vid ? 1 : 0);
+        const newDsp      = (m.external_metadata?.spotify?.track?.id ? 1 : 0) + (m.external_metadata?.youtube?.vid ? 1 : 0);
+        if ((m.score || 0) > (existing.score || 0) || newDsp > existingDsp) {
+          // Merge: take highest score but union DSP metadata
+          const merged = { ...existing, ...m, score: Math.max(m.score || 0, existing.score || 0) };
+          merged.external_metadata = { ...existing.external_metadata, ...m.external_metadata };
+          musicMap.set(key, merged);
+        }
+      }
     }
     for (const m of (r?.metadata?.humming || [])) {
-      const key = (m.title || "").toLowerCase().trim();
+      const key = normaliseTitle(m.title);
       if (!key) continue;
       const existing = hummingMap.get(key);
       if (!existing || (m.score || 0) > (existing.score || 0)) hummingMap.set(key, m);
@@ -236,11 +255,10 @@ async function identifyAudd(buffer, filename) {
 // ── Fan-out: all slices × both engines, fully parallel ────────
 async function scanAllEngines(buffer, filename, mimetype) {
   const slices = getSlices(buffer);
-  // Fire every ACRCloud slice + AudD on the best slice (middle) simultaneously
-  const middleSlice = slices[Math.floor(slices.length / 2)];
+  // Fire all ACRCloud slices + AudD on every slice simultaneously
   const tasks = [
     ...slices.map(s => identifyACR(s, filename, mimetype)),
-    identifyAudd(middleSlice, filename),
+    ...slices.map(s => identifyAudd(s, filename)),
   ];
   const results = await Promise.all(tasks);
   const valid   = results.filter(Boolean);
@@ -580,7 +598,7 @@ app.post("/scan", (req, res, next) => {
         function isGoodMatch(m) {
           if (!m) return false;
           const score = m.score || 100;
-          if (score < 90) return false;
+          if (score < 80) return false;
           const title = (m.title || "").toLowerCase().trim();
           if (BAD_TITLES.includes(title)) return false;
           if (title.includes("untitled")) return false;
@@ -926,7 +944,7 @@ app.post("/rescan", async (req, res) => {
         const scanMusic  = acrData?.metadata?.music || [];
         function isGoodRescanMatch(m) {
           if (!m) return false;
-          if ((m.score||100) < 90) return false;
+          if ((m.score||100) < 80) return false;
           const t = (m.title||"").toLowerCase().trim();
           const badT = ["unknown","untitled","","no title","n/a","na","null","undefined"];
           if (badT.includes(t)||t.includes("untitled")) return false;
@@ -966,5 +984,3 @@ app.post("/rescan", async (req, res) => {
 });
 
 app.listen(port, "0.0.0.0", ()=>console.log(`Server listening on 0.0.0.0:${port}`));
-
-
