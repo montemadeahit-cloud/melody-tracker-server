@@ -128,7 +128,7 @@ function getSlices(buffer) {
   if (buffer.length <= MIN_SCAN_BYTES) return [buffer];
   const s   = SLICE_BYTES;
   const len = buffer.length;
-  const offsets = [0.10, 0.25, 0.45, 0.62, 0.78].map(p => Math.floor(len * p));
+  const offsets = [0.10, 0.28, 0.50, 0.75].map(p => Math.floor(len * p));
   return offsets.map(o => buffer.slice(o, Math.min(o + s, len)));
 }
 
