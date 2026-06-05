@@ -17,7 +17,7 @@ app.use(cors({
 app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const ACR_HOST         = process.env.ACR_HOST;
 const ACR_KEY          = process.env.ACR_KEY;
@@ -402,7 +402,15 @@ app.post("/auth/reset-password", async (req, res) => {
 });
 
 // ── Scan ──────────────────────────────────────────────────────
-app.post("/scan", upload.single("file"), async (req, res) => {
+app.post("/scan", (req, res, next) => {
+  upload.single("file")(req, res, (err) => {
+    if (err && err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({ error: "File size is too large. Consider uploading an .mp3" });
+    }
+    if (err) return res.status(400).json({ error: "Upload error: " + err.message });
+    next();
+  });
+}, async (req, res) => {
   try {
     if (!ACR_HOST||!ACR_KEY||!ACR_SECRET) return res.status(500).json({ error:"ACRCloud credentials not configured." });
     if (!req.file) return res.status(400).json({ error:"No file uploaded." });
@@ -428,6 +436,19 @@ app.post("/scan", upload.single("file"), async (req, res) => {
     const clientKey = req.body.client_key || null;
     const clientBpm = req.body.client_bpm ? parseFloat(req.body.client_bpm) : null;
 
+    // Extract BPM from filename — producers commonly include it at the end
+    // Matches patterns like: "mysong 140bpm.mp3", "beat_95 BPM.wav", "trap140.mp3", "[140]", "(95bpm)"
+    let filenameBpm = null;
+    const bpmMatch = req.file.originalname.match(/[\s_\-\[\(](\d{2,3})[\s_\-\]\)]?(?:bpm)?(?:\.|$)/i)
+      || req.file.originalname.match(/(\d{2,3})\s*bpm/i)
+      || req.file.originalname.match(/[\s_\-](\d{2,3})(?:\.|_|-|\s|$)/i);
+    if (bpmMatch) {
+      const candidate = parseInt(bpmMatch[1]);
+      // Sanity check — realistic BPM range
+      if (candidate >= 60 && candidate <= 200) filenameBpm = candidate;
+    }
+    console.log("BPM sources — ACR:", metadata.beats?.bpm, "client:", clientBpm, "filename:", filenameBpm);
+
     const metadata  = acrData?.metadata || {};
     const acrBpm    = metadata.beats?.bpm || metadata.music?.[0]?.bpm || null;
     const acrKey    = metadata.music?.[0]?.key?.note
@@ -435,8 +456,8 @@ app.post("/scan", upload.single("file"), async (req, res) => {
       : null;
     const durationMs = metadata.music?.[0]?.duration_ms || null;
 
-    // Use ACRCloud values when available, fall back to client-detected
-    const bpm      = acrBpm || clientBpm;
+    // Priority: ACRCloud (most accurate) → filename (explicit) → client-detected (analyzed)
+    const bpm      = acrBpm || filenameBpm || clientBpm;
     const audioKey = acrKey || clientKey;
 
     if (user_id && SUPABASE_URL) {
