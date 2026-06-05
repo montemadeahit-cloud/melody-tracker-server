@@ -447,14 +447,13 @@ app.post("/scan", (req, res, next) => {
       // Sanity check — realistic BPM range
       if (candidate >= 60 && candidate <= 200) filenameBpm = candidate;
     }
-    console.log("BPM sources — ACR:", metadata.beats?.bpm, "client:", clientBpm, "filename:", filenameBpm);
-
     const metadata  = acrData?.metadata || {};
     const acrBpm    = metadata.beats?.bpm || metadata.music?.[0]?.bpm || null;
     const acrKey    = metadata.music?.[0]?.key?.note
       ? (metadata.music[0].key.note + (metadata.music[0].key.scale ? " " + metadata.music[0].key.scale : ""))
       : null;
     const durationMs = metadata.music?.[0]?.duration_ms || null;
+    console.log("BPM sources — ACR:", metadata.beats?.bpm, "client:", clientBpm, "filename:", filenameBpm);
 
     // Priority: ACRCloud (most accurate) → filename (explicit) → client-detected (analyzed)
     const bpm      = acrBpm || filenameBpm || clientBpm;
