@@ -114,7 +114,67 @@ async function storageDelete(path) {
   }); return r.ok;
 }
 
-// ── Audio fingerprint hash ────────────────────────────────────
+// ── Audio segment slicer ──────────────────────────────────────
+// ACRCloud is tuned for short Shazam-style clips (~20s).
+// We slice 3 positions — early (past intro), middle (hook), late (verse/chorus) —
+// and fire them in parallel. Results are merged and de-duped by title so a match
+// from any slice surfaces in the final response.
+const SLICE_BYTES    = 32 * 1024 * 20;  // ~20s at 256kbps equiv
+const MIN_SCAN_BYTES = 32 * 1024 * 15;  // skip slicing if file is under ~15s
+function getSlices(buffer) {
+  if (buffer.length <= MIN_SCAN_BYTES) return [buffer]; // short file — send as-is
+  const s = SLICE_BYTES;
+  const len = buffer.length;
+  // early: 15% in, middle: 45% in, late: 70% in — avoids pure intro/outro
+  const offsets = [
+    Math.floor(len * 0.15),
+    Math.floor(len * 0.45),
+    Math.floor(len * 0.70),
+  ];
+  return offsets.map(o => buffer.slice(o, Math.min(o + s, len)));
+}
+
+// Merge results from multiple ACRCloud responses into one synthetic response.
+// Keeps the highest-scored match for each unique title, so the frontend sees
+// one clean deduplicated list regardless of how many slices matched.
+function mergeAcrResults(responses) {
+  // Use the first successful status as the envelope
+  const primary = responses.find(r => r?.status?.code === 0) || responses[0];
+  const merged  = { ...primary };
+
+  const musicMap  = new Map(); // title.toLowerCase() → best match object
+  const hummingMap = new Map();
+
+  for (const r of responses) {
+    for (const m of (r?.metadata?.music || [])) {
+      const key = (m.title || "").toLowerCase().trim();
+      if (!key) continue;
+      const existing = musicMap.get(key);
+      if (!existing || (m.score || 0) > (existing.score || 0)) musicMap.set(key, m);
+    }
+    for (const m of (r?.metadata?.humming || [])) {
+      const key = (m.title || "").toLowerCase().trim();
+      if (!key) continue;
+      const existing = hummingMap.get(key);
+      if (!existing || (m.score || 0) > (existing.score || 0)) hummingMap.set(key, m);
+    }
+  }
+
+  // Sort by score descending so best matches appear first
+  const music   = [...musicMap.values()].sort((a,b) => (b.score||0) - (a.score||0));
+  const humming = [...hummingMap.values()].sort((a,b) => (b.score||0) - (a.score||0));
+
+  merged.metadata = {
+    ...(primary?.metadata || {}),
+    music,
+    humming,
+  };
+
+  // If any slice got a hit, treat the merged result as a hit
+  if (music.length > 0) merged.status = { code: 0, msg: "Success" };
+
+  return merged;
+}
 // Creates a unique content-based ID from the audio file itself
 // This is stored permanently so the beat can be identified in future
 function computeAudioHash(buffer) {
@@ -424,12 +484,17 @@ app.post("/scan", (req, res, next) => {
       if (Array.isArray(existing)&&existing.length>0) return res.status(400).json({ error:`"${req.file.originalname}" has already been submitted.` });
     }
 
-    const acrData = await identify(req.file.buffer, req.file.originalname, req.file.mimetype);
-    console.log("ACRCloud:", JSON.stringify(acrData));
-
-    // Compute audio fingerprint hash from file content — always, regardless of match result
+    // Hash the FULL file — permanent fingerprint ID is always based on the complete audio
     const audioHash     = computeAudioHash(req.file.buffer);
-    const fingerprintId = audioHash; // TMP-{32 char hex} — permanent unique ID for this beat
+    const fingerprintId = audioHash;
+
+    // Slice the file into up to 3 segments and scan in parallel
+    const slices   = getSlices(req.file.buffer);
+    const acrResults = await Promise.all(
+      slices.map(slice => identify(slice, req.file.originalname, req.file.mimetype))
+    );
+    console.log("ACRCloud slices:", acrResults.map(r => JSON.stringify({ code: r?.status?.code, hits: r?.metadata?.music?.length || 0 })));
+    const acrData  = mergeAcrResults(acrResults);
 
     // Extract BPM, key, duration from ACRCloud response if available
     // Fall back to client-side detected values if ACRCloud didn't return them
