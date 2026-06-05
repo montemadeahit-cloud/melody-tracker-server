@@ -115,34 +115,50 @@ async function storageDelete(path) {
 }
 
 // ── Audio segment slicer ──────────────────────────────────────
-// ACRCloud is tuned for short Shazam-style clips (~20s).
-// We slice 3 positions — early (past intro), middle (hook), late (verse/chorus) —
-// and fire them in parallel. Results are merged and de-duped by title so a match
-// from any slice surfaces in the final response.
+// 5 slices at music-structure-aware positions:
+//   10% — just past the intro
+//   25% — first verse/hook entry
+//   45% — mid-track hook (most distinctive)
+//   62% — second chorus / bridge
+//   78% — late verse, before outro
+// All slices are ~20s. Short files skip slicing and send as-is.
 const SLICE_BYTES    = 32 * 1024 * 20;  // ~20s at 256kbps equiv
 const MIN_SCAN_BYTES = 32 * 1024 * 15;  // skip slicing if file is under ~15s
 function getSlices(buffer) {
-  if (buffer.length <= MIN_SCAN_BYTES) return [buffer]; // short file — send as-is
-  const s = SLICE_BYTES;
+  if (buffer.length <= MIN_SCAN_BYTES) return [buffer];
+  const s   = SLICE_BYTES;
   const len = buffer.length;
-  // early: 15% in, middle: 45% in, late: 70% in — avoids pure intro/outro
-  const offsets = [
-    Math.floor(len * 0.15),
-    Math.floor(len * 0.45),
-    Math.floor(len * 0.70),
-  ];
+  const offsets = [0.10, 0.25, 0.45, 0.62, 0.78].map(p => Math.floor(len * p));
   return offsets.map(o => buffer.slice(o, Math.min(o + s, len)));
 }
 
-// Merge results from multiple ACRCloud responses into one synthetic response.
-// Keeps the highest-scored match for each unique title, so the frontend sees
-// one clean deduplicated list regardless of how many slices matched.
-function mergeAcrResults(responses) {
-  // Use the first successful status as the envelope
-  const primary = responses.find(r => r?.status?.code === 0) || responses[0];
-  const merged  = { ...primary };
+// ── Result normaliser ─────────────────────────────────────────
+// Converts an AudD result into the same shape as an ACRCloud music entry
+// so both engines feed into the same merge function.
+function normaliseAuddResult(r) {
+  if (!r || !r.title) return null;
+  const score = r.score != null ? r.score * 100 : 85; // AudD returns 0–1
+  const external_metadata = {};
+  if (r.spotify?.id)         external_metadata.spotify = { track: { id: r.spotify.id }, popularity: r.spotify.popularity || null };
+  if (r.itunes?.trackId)     external_metadata.itunes  = { track: { id: r.itunes.trackId } };
+  if (r.deezer?.id)          external_metadata.deezer  = { track: { id: String(r.deezer.id) } };
+  if (r.youtube?.videoid)    external_metadata.youtube = { vid: r.youtube.videoid };
+  return {
+    title:             r.title,
+    artists:           r.artist ? [{ name: r.artist }] : [],
+    release_date:      r.release_date || null,
+    score,
+    external_metadata,
+    _source:           "audd",
+  };
+}
 
-  const musicMap  = new Map(); // title.toLowerCase() → best match object
+// ── Merge results from all engines + all slices ───────────────
+// De-dupes by title (case-insensitive), keeps highest score per title,
+// marks the source engine on each result for debugging.
+function mergeAllResults(responses) {
+  const primary   = responses.find(r => r?.status?.code === 0) || responses[0] || {};
+  const musicMap  = new Map();
   const hummingMap = new Map();
 
   for (const r of responses) {
@@ -160,46 +176,84 @@ function mergeAcrResults(responses) {
     }
   }
 
-  // Sort by score descending so best matches appear first
-  const music   = [...musicMap.values()].sort((a,b) => (b.score||0) - (a.score||0));
-  const humming = [...hummingMap.values()].sort((a,b) => (b.score||0) - (a.score||0));
+  const music   = [...musicMap.values()].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const humming = [...hummingMap.values()].sort((a, b) => (b.score || 0) - (a.score || 0));
 
-  merged.metadata = {
-    ...(primary?.metadata || {}),
-    music,
-    humming,
+  return {
+    ...primary,
+    status:   music.length > 0 ? { code: 0, msg: "Success" } : (primary?.status || { code: 1001, msg: "No result" }),
+    metadata: { ...(primary?.metadata || {}), music, humming },
   };
-
-  // If any slice got a hit, treat the merged result as a hit
-  if (music.length > 0) merged.status = { code: 0, msg: "Success" };
-
-  return merged;
 }
 // Creates a unique content-based ID from the audio file itself
 // This is stored permanently so the beat can be identified in future
 function computeAudioHash(buffer) {
-  // SHA-256 of the raw audio bytes — unique per file content
   const hash = crypto.createHash("sha256").update(buffer).digest("hex");
-  // Prefix with TMP- to make it clearly a TrackMyPlacements fingerprint ID
   return "TMP-" + hash.slice(0, 32).toUpperCase();
 }
 
 // ── ACRCloud ──────────────────────────────────────────────────
-async function identify(buffer, filename, mimetype) {
+async function identifyACR(buffer, filename, mimetype) {
   const timestamp = Math.floor(Date.now()/1000);
   const sig = crypto.createHmac("sha1",ACR_SECRET).update(`POST\n/v1/identify\n${ACR_KEY}\naudio\n1\n${timestamp}`).digest("base64");
   const form = new FormData();
-  form.append("sample",buffer,{filename,contentType:mimetype});
-  form.append("access_key",ACR_KEY);
-  form.append("data_type","audio");
-  form.append("signature_version","1");
-  form.append("signature",sig);
-  form.append("sample_bytes",buffer.length.toString());
-  form.append("timestamp",timestamp.toString());
-  // Request additional metadata: BPM, key, beats, genre
-  form.append("return","music,beats,genre,bpm,key");
-  const res = await fetch(`https://${ACR_HOST}/v1/identify`,{method:"POST",body:form});
+  form.append("sample", buffer, { filename, contentType: mimetype });
+  form.append("access_key",        ACR_KEY);
+  form.append("data_type",         "audio");
+  form.append("signature_version", "1");
+  form.append("signature",         sig);
+  form.append("sample_bytes",      buffer.length.toString());
+  form.append("timestamp",         timestamp.toString());
+  form.append("return",            "music,beats,genre,bpm,key");
+  const res = await fetch(`https://${ACR_HOST}/v1/identify`, { method:"POST", body:form });
   return res.json();
+}
+
+// ── AudD ──────────────────────────────────────────────────────
+// Second fingerprint engine — different database, parallel to ACRCloud.
+// Returns results normalised into ACRCloud music-entry shape.
+const AUDD_KEY = process.env.AUDD_API_TOKEN;
+async function identifyAudd(buffer, filename) {
+  if (!AUDD_KEY) return null;
+  try {
+    const form = new FormData();
+    form.append("file",    buffer, { filename, contentType: "audio/mpeg" });
+    form.append("api_token", AUDD_KEY);
+    form.append("return",    "spotify,deezer,itunes,youtube");
+    const res  = await fetch("https://api.audd.io/", { method:"POST", body:form });
+    const data = await res.json();
+    if (data?.status !== "success" || !data?.result) return null;
+    const norm = normaliseAuddResult(data.result);
+    if (!norm) return null;
+    // Wrap in ACRCloud envelope shape so mergeAllResults handles it uniformly
+    return { status: { code: 0, msg: "Success" }, metadata: { music: [norm], humming: [] } };
+  } catch(e) {
+    console.error("AudD error:", e.message);
+    return null;
+  }
+}
+
+// ── Fan-out: all slices × both engines, fully parallel ────────
+async function scanAllEngines(buffer, filename, mimetype) {
+  const slices = getSlices(buffer);
+  // Fire every ACRCloud slice + AudD on the best slice (middle) simultaneously
+  const middleSlice = slices[Math.floor(slices.length / 2)];
+  const tasks = [
+    ...slices.map(s => identifyACR(s, filename, mimetype)),
+    identifyAudd(middleSlice, filename),
+  ];
+  const results = await Promise.all(tasks);
+  const valid   = results.filter(Boolean);
+  console.log("Scan engines:", results.map((r,i) => {
+    if (!r) return `task${i}:skipped`;
+    return `task${i}:code=${r?.status?.code},hits=${r?.metadata?.music?.length||0}`;
+  }));
+  return mergeAllResults(valid);
+}
+
+// Keep backward-compat alias used by rescan route
+async function identify(buffer, filename, mimetype) {
+  return identifyACR(buffer, filename, mimetype);
 }
 
 // ── Stripe ────────────────────────────────────────────────────
@@ -488,13 +542,8 @@ app.post("/scan", (req, res, next) => {
     const audioHash     = computeAudioHash(req.file.buffer);
     const fingerprintId = audioHash;
 
-    // Slice the file into up to 3 segments and scan in parallel
-    const slices   = getSlices(req.file.buffer);
-    const acrResults = await Promise.all(
-      slices.map(slice => identify(slice, req.file.originalname, req.file.mimetype))
-    );
-    console.log("ACRCloud slices:", acrResults.map(r => JSON.stringify({ code: r?.status?.code, hits: r?.metadata?.music?.length || 0 })));
-    const acrData  = mergeAcrResults(acrResults);
+    // Fan out across 5 slices × 2 engines (ACRCloud + AudD), all in parallel
+    const acrData = await scanAllEngines(req.file.buffer, req.file.originalname, req.file.mimetype);
 
     // Extract BPM, key, duration from ACRCloud response if available
     // Fall back to client-side detected values if ACRCloud didn't return them
@@ -872,7 +921,7 @@ app.post("/rescan", async (req, res) => {
         if (!status.hasAccess) { console.log(`Skipping ${beat.id} — no access`); continue; }
         const buffer=await storageDownload(beat.storage_path);
         if (!buffer) continue;
-        const acrData=await identify(buffer,beat.filename,"audio/mpeg");
+        const acrData=await scanAllEngines(buffer, beat.filename, "audio/mpeg");
         const rawMatched = acrData?.status?.code===0;
         const scanMusic  = acrData?.metadata?.music || [];
         function isGoodRescanMatch(m) {
