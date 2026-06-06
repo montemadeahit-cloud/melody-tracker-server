@@ -117,19 +117,25 @@ async function storageDelete(path) {
 // ── Audio segment slicer ──────────────────────────────────────
 // 5 slices at music-structure-aware positions:
 //   10% — just past the intro
-//   25% — first verse/hook entry
-//   45% — mid-track hook (most distinctive)
-//   62% — second chorus / bridge
-//   78% — late verse, before outro
-// All slices are ~20s. Short files skip slicing and send as-is.
-const SLICE_BYTES    = 32 * 1024 * 20;  // ~20s at 256kbps equiv
+//   28% — first verse/hook entry
+//   50% — mid-track hook (most distinctive)
+//   75% — second chorus / bridge
+//   90% — late verse / outro drop
+// All slices are ~25s (bumped from 20s — more waveform = higher confidence).
+// Short files skip slicing and send as-is.
+// Medium files also get a full-buffer pass for maximum coverage.
+const SLICE_BYTES    = 32 * 1024 * 25;  // ~25s at 256kbps equiv
 const MIN_SCAN_BYTES = 32 * 1024 * 15;  // skip slicing if file is under ~15s
+const FULL_PASS_MAX  = 32 * 1024 * 90;  // include full buffer pass if file is under ~90s
 function getSlices(buffer) {
   if (buffer.length <= MIN_SCAN_BYTES) return [buffer];
   const s   = SLICE_BYTES;
   const len = buffer.length;
-  const offsets = [0.10, 0.28, 0.50, 0.75].map(p => Math.floor(len * p));
-  return offsets.map(o => buffer.slice(o, Math.min(o + s, len)));
+  const offsets = [0.10, 0.28, 0.50, 0.75, 0.90].map(p => Math.floor(len * p));
+  const slices = offsets.map(o => buffer.slice(o, Math.min(o + s, len)));
+  // Also include the full buffer as an extra pass for shorter tracks
+  if (len <= FULL_PASS_MAX) slices.push(buffer);
+  return slices;
 }
 
 // ── Result normaliser ─────────────────────────────────────────
@@ -252,19 +258,68 @@ async function identifyAudd(buffer, filename) {
   }
 }
 
-// ── Fan-out: all slices × both engines, fully parallel ────────
+// ── Shazam (via RapidAPI) ─────────────────────────────────────
+// Third fingerprint engine — different algorithm and database to ACRCloud/AudD.
+// Particularly strong on rap/trap/R&B instrumentals.
+// Requires RAPIDAPI_KEY env var.
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+async function identifyShazam(buffer, filename) {
+  if (!RAPIDAPI_KEY) return null;
+  try {
+    const form = new FormData();
+    form.append("upload_file", buffer, { filename, contentType: "audio/mpeg" });
+    const res = await fetch("https://shazam-song-recognizer.p.rapidapi.com/recognize/file", {
+      method: "POST",
+      headers: {
+        "x-rapidapi-key":  RAPIDAPI_KEY,
+        "x-rapidapi-host": "shazam-song-recognizer.p.rapidapi.com",
+      },
+      body: form,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    // Shazam returns { track: { title, subtitle, key, sections, hub } }
+    const track = data?.track;
+    if (!track || !track.title) return null;
+    const external_metadata = {};
+    // Extract Spotify link from hub actions if present
+    const spotifyAction = track.hub?.actions?.find(a => a.uri && a.uri.includes("spotify"));
+    if (spotifyAction) {
+      const spotifyId = spotifyAction.uri.split("/track/")[1]?.split("?")[0];
+      if (spotifyId) external_metadata.spotify = { track: { id: spotifyId } };
+    }
+    // Extract Apple Music link
+    const appleAction = track.hub?.actions?.find(a => a.uri && a.uri.includes("apple"));
+    if (appleAction) external_metadata.itunes = { uri: appleAction.uri };
+    const norm = {
+      title:             track.title,
+      artists:           track.subtitle ? [{ name: track.subtitle }] : [],
+      release_date:      null,
+      score:             90, // Shazam doesn't return a confidence score — treat hits as high confidence
+      external_metadata,
+      _source:           "shazam",
+    };
+    return { status: { code: 0, msg: "Success" }, metadata: { music: [norm], humming: [] } };
+  } catch(e) {
+    console.error("Shazam error:", e.message);
+    return null;
+  }
+}
+
+// ── Fan-out: all slices × all three engines, fully parallel ───
 async function scanAllEngines(buffer, filename, mimetype) {
   const slices = getSlices(buffer);
-  // Fire all ACRCloud slices + AudD on every slice simultaneously
+  // Fire all ACRCloud slices + AudD + Shazam on every slice simultaneously
   const tasks = [
     ...slices.map(s => identifyACR(s, filename, mimetype)),
     ...slices.map(s => identifyAudd(s, filename)),
+    ...slices.map(s => identifyShazam(s, filename)),
   ];
   const results = await Promise.all(tasks);
   const valid   = results.filter(Boolean);
-  console.log("Scan engines:", results.map((r,i) => {
+  console.log(`Scan engines (${slices.length} slices × 3 engines = ${tasks.length} tasks):`, results.map((r,i) => {
     if (!r) return `task${i}:skipped`;
-    return `task${i}:code=${r?.status?.code},hits=${r?.metadata?.music?.length||0}`;
+    return `task${i}:code=${r?.status?.code},hits=${r?.metadata?.music?.length||0},src=${r?.metadata?.music?.[0]?._source||"acr"}`;
   }));
   return mergeAllResults(valid);
 }
@@ -463,6 +518,7 @@ app.get("/", (req, res) => res.json({
   stripePriceT2:!!STRIPE_PRICE_T2,
   stripeWebhook:!!STRIPE_WEBHOOK,
   resend:!!RESEND_KEY,
+  shazam:!!RAPIDAPI_KEY,
   appUrl:APP_URL,
 }));
 
@@ -1000,21 +1056,35 @@ app.get("/profile/:user_id", async (req, res) => {
   catch(err) { res.status(500).json({ error:err.message }); }
 });
 
-// ── Daily rescan ──────────────────────────────────────────────
+// ── Rescan (twice daily) ───────────────────────────────────────
+// Hit POST /rescan with header x-rescan-secret on a cron schedule.
+// Recommended: 0 6 * * * and 0 18 * * * (6am + 6pm UTC) for ~12h detection window.
+// Each call uses the full 3-engine fan-out (ACRCloud + AudD + Shazam).
+const rescanLog = { lastRun: null, lastResult: null };
+
+app.get("/rescan/status", (req, res) => {
+  if (req.headers["x-rescan-secret"]!==RESCAN_SECRET) return res.status(401).json({ error:"Unauthorized" });
+  res.json({ lastRun: rescanLog.lastRun, lastResult: rescanLog.lastResult });
+});
+
 app.post("/rescan", async (req, res) => {
   if (req.headers["x-rescan-secret"]!==RESCAN_SECRET) return res.status(401).json({ error:"Unauthorized" });
   try {
     const beats = await sbSelect("beats","status=eq.monitoring&order=last_scanned.asc");
-    if (!Array.isArray(beats)||beats.length===0) return res.json({ message:"No beats to rescan.",count:0 });
-    console.log(`Rescanning ${beats.length} beats...`);
-    let newMatches=0;
+    if (!Array.isArray(beats)||beats.length===0) {
+      rescanLog.lastRun = new Date().toISOString();
+      rescanLog.lastResult = { message:"No beats to rescan.", count:0 };
+      return res.json(rescanLog.lastResult);
+    }
+    console.log(`Rescanning ${beats.length} beats (3 engines × up to 6 slices each)...`);
+    let newMatches=0, scanned=0, skipped=0;
     for (const beat of beats) {
       try {
-        if (!beat.storage_path) continue;
+        if (!beat.storage_path) { skipped++; continue; }
         const status=await getSubscriptionStatus(beat.user_id);
-        if (!status.hasAccess) { console.log(`Skipping ${beat.id} — no access`); continue; }
+        if (!status.hasAccess) { console.log(`Skipping ${beat.id} — no access`); skipped++; continue; }
         const buffer=await storageDownload(beat.storage_path);
-        if (!buffer) continue;
+        if (!buffer) { skipped++; continue; }
         const acrData=await scanAllEngines(buffer, beat.filename, "audio/mpeg");
         const rawMatched = acrData?.status?.code===0;
         const scanMusic  = acrData?.metadata?.music || [];
@@ -1029,6 +1099,7 @@ app.post("/rescan", async (req, res) => {
         const goodRescanMusic = rawMatched ? scanMusic.filter(isGoodRescanMatch) : [];
         const matched = goodRescanMusic.length > 0;
         const bestRescan = matched ? goodRescanMusic[0] : null;
+        scanned++;
         if (matched) {
           const title     = bestRescan?.title;
           const artist    = bestRescan?.artists?.[0]?.name;
@@ -1052,10 +1123,14 @@ app.post("/rescan", async (req, res) => {
             }
           }
         } else { await sbUpdate("beats",`id=eq.${beat.id}`,{ last_scanned:new Date().toISOString() }); }
-        await new Promise(r=>setTimeout(r,500));
-      } catch(e) { console.error(`Rescan error beat ${beat.id}:`,e.message); }
+        // Stagger requests — slightly longer gap to respect rate limits across 3 engines
+        await new Promise(r=>setTimeout(r,700));
+      } catch(e) { console.error(`Rescan error beat ${beat.id}:`,e.message); skipped++; }
     }
-    res.json({ message:"Rescan complete.", total:beats.length, newMatches });
+    const result = { message:"Rescan complete.", total:beats.length, scanned, skipped, newMatches };
+    rescanLog.lastRun = new Date().toISOString();
+    rescanLog.lastResult = result;
+    res.json(result);
   } catch(e) { console.error("Rescan error:",e.message); res.status(500).json({ error:e.message }); }
 });
 
