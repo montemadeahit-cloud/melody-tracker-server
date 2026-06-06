@@ -347,23 +347,23 @@ async function sendEmail(to, subject, html) {
 
 function baseEmail(content) {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
-  <body style="margin:0;padding:0;background:#050506;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#050506;padding:40px 16px;">
+  <body style="margin:0;padding:0;background:#0e0e14;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0e0e14;padding:40px 16px;">
     <tr><td align="center">
-      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:linear-gradient(180deg,#0f0f13 0%,#0a0a0d 100%);border:1px solid #1e1e28;border-top:1px solid #2a2a36;border-radius:20px;overflow:hidden;">
-        <tr><td style="height:3px;background:linear-gradient(90deg,#ffffff,#cccccc);font-size:0;">&nbsp;</td></tr>
+      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:linear-gradient(180deg,#1a1a24 0%,#13131c 100%);border:1px solid #2e2e40;border-top:1px solid #42425a;border-radius:20px;overflow:hidden;">
+        <tr><td style="height:3px;background:linear-gradient(90deg,#ffffff,#dddddd);font-size:0;">&nbsp;</td></tr>
         <tr><td style="padding:32px 36px 0;">
-          <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:16px;font-weight:700;color:#e8e4dc;letter-spacing:-.2px;">TrackMy<span style="color:#ffffff;">Placements</span></div>
+          <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:16px;font-weight:700;color:#f0ece4;letter-spacing:-.2px;">TrackMy<span style="color:#ffffff;">Placements</span></div>
         </td></tr>
         <tr><td style="padding:0 36px 32px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
           ${content}
         </td></tr>
-        <tr><td style="padding:20px 36px;border-top:1px solid rgba(255,255,255,0.06);">
-          <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:11px;color:rgba(238,234,226,0.2);line-height:1.7;">
-            <a href="${APP_URL}" style="color:rgba(238,234,226,0.3);text-decoration:none;font-weight:600;">trackmyplacements.com</a> &nbsp;·&nbsp; Placement Location Engine
+        <tr><td style="padding:20px 36px;border-top:1px solid rgba(255,255,255,0.1);">
+          <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:11px;color:rgba(255,255,255,0.35);line-height:1.7;">
+            <a href="${APP_URL}" style="color:rgba(255,255,255,0.5);text-decoration:none;font-weight:600;">trackmyplacements.com</a> &nbsp;·&nbsp; Placement Location Engine
           </div>
         </td></tr>
-        <tr><td style="height:3px;background:linear-gradient(90deg,#ffffff,#cccccc);font-size:0;">&nbsp;</td></tr>
+        <tr><td style="height:3px;background:linear-gradient(90deg,#ffffff,#dddddd);font-size:0;">&nbsp;</td></tr>
       </table>
     </td></tr>
   </table>
@@ -373,26 +373,26 @@ function baseEmail(content) {
 function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
   const link = spotifyId ? `https://open.spotify.com/track/${spotifyId}` : youtubeId ? `https://youtube.com/watch?v=${youtubeId}` : null;
   return baseEmail(`
-    <div style="margin-top:28px;padding:20px 22px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-top:1px solid rgba(255,255,255,0.14);border-radius:14px;margin-bottom:24px;">
-      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Placement detected</div>
-      <div style="font-size:22px;font-weight:800;color:#eeeae2;letter-spacing:-.3px;margin-bottom:4px;">${title}</div>
-      <div style="font-size:14px;color:rgba(238,234,226,0.45);margin-bottom:0;">${artist || "Unknown artist"}</div>
+    <div style="margin-top:28px;padding:22px 24px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.18);border-top:1px solid rgba(255,255,255,0.26);border-radius:14px;margin-bottom:24px;">
+      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.55);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Placement detected</div>
+      <div style="font-size:22px;font-weight:800;color:#ffffff;letter-spacing:-.3px;margin-bottom:4px;">${title}</div>
+      <div style="font-size:14px;color:rgba(255,255,255,0.6);margin-bottom:0;">${artist || "Unknown artist"}</div>
     </div>
-    <div style="font-size:11px;font-weight:600;color:rgba(238,234,226,0.3);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;">Your beat</div>
-    <div style="font-size:14px;font-weight:600;color:#e8e4dc;margin-bottom:28px;">${filename}</div>
+    <div style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;">Your beat</div>
+    <div style="font-size:14px;font-weight:600;color:#f0ece4;margin-bottom:28px;">${filename}</div>
     ${link ? `<a href="${link}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 24px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Listen to the track ↗</a>` : ""}
-    <p style="margin:24px 0 0;font-size:12px;color:rgba(238,234,226,0.25);line-height:1.7;">Head to your TrackMyPlacements dashboard to verify this placement and add it to your catalog.</p>
+    <p style="margin:24px 0 0;font-size:12px;color:rgba(255,255,255,0.4);line-height:1.7;">Head to your TrackMyPlacements dashboard to verify this placement and add it to your catalog.</p>
   `);
 }
 
 function passwordResetEmailHtml(resetUrl) {
   return baseEmail(`
     <div style="margin-top:28px;margin-bottom:8px;">
-      <div style="font-size:10px;font-weight:700;color:rgba(238,234,226,0.3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Account</div>
-      <div style="font-size:22px;font-weight:800;color:#eeeae2;letter-spacing:-.3px;margin-bottom:12px;">Reset your password</div>
-      <p style="font-size:14px;color:rgba(238,234,226,0.5);line-height:1.75;margin:0 0 28px;">Click the button below to set a new password. This link expires in <span style="color:#e8e4dc;font-weight:600;">1 hour</span>.</p>
+      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.45);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Account</div>
+      <div style="font-size:22px;font-weight:800;color:#ffffff;letter-spacing:-.3px;margin-bottom:12px;">Reset your password</div>
+      <p style="font-size:14px;color:rgba(255,255,255,0.6);line-height:1.75;margin:0 0 28px;">Click the button below to set a new password. This link expires in <span style="color:#ffffff;font-weight:600;">1 hour</span>.</p>
       <a href="${resetUrl}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 24px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Reset my password ↗</a>
-      <p style="margin:20px 0 0;font-size:12px;color:rgba(238,234,226,0.2);line-height:1.6;">Didn't request this? You can safely ignore this email.</p>
+      <p style="margin:20px 0 0;font-size:12px;color:rgba(255,255,255,0.35);line-height:1.6;">Didn't request this? You can safely ignore this email.</p>
     </div>
   `);
 }
@@ -400,11 +400,11 @@ function passwordResetEmailHtml(resetUrl) {
 function welcomeEmailHtml(username) {
   return baseEmail(`
     <div style="margin-top:28px;">
-      <div style="font-size:10px;font-weight:700;color:rgba(238,234,226,0.3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:12px;">Welcome</div>
-      <div style="font-size:26px;font-weight:800;color:#eeeae2;letter-spacing:-.4px;line-height:1.2;margin-bottom:16px;">You're in, @${username}.</div>
-      <p style="font-size:14px;color:rgba(238,234,226,0.45);line-height:1.8;margin:0 0 28px;">Right now your beats have no identifier on the internet — that's why placements are hard to track. Upload one and we assign it a unique ID, scan it immediately across all major platforms, and email you the moment it surfaces anywhere.</p>
+      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.45);letter-spacing:.14em;text-transform:uppercase;margin-bottom:12px;">Welcome</div>
+      <div style="font-size:26px;font-weight:800;color:#ffffff;letter-spacing:-.4px;line-height:1.2;margin-bottom:16px;">You're in, @${username}.</div>
+      <p style="font-size:14px;color:rgba(255,255,255,0.6);line-height:1.8;margin:0 0 28px;">Right now your beats have no identifier on the internet — that's why placements are hard to track. Upload one and we assign it a unique ID, scan it immediately across all major platforms, and email you the moment it surfaces anywhere.</p>
 
-      <div style="height:1px;background:rgba(255,255,255,0.07);margin-bottom:24px;"></div>
+      <div style="height:1px;background:rgba(255,255,255,0.12);margin-bottom:24px;"></div>
 
       <table width="100%" cellpadding="0" cellspacing="0">
         ${[
@@ -415,9 +415,9 @@ function welcomeEmailHtml(username) {
         ].map(([icon, label, body]) => `
         <tr>
           <td style="padding:10px 0;vertical-align:top;width:28px;font-size:15px;">${icon}</td>
-          <td style="padding:10px 0 10px 12px;vertical-align:top;border-bottom:1px solid rgba(255,255,255,0.06);">
-            <div style="font-size:13px;font-weight:700;color:#eeeae2;margin-bottom:2px;">${label}</div>
-            <div style="font-size:12px;color:rgba(238,234,226,0.38);line-height:1.6;">${body}</div>
+          <td style="padding:10px 0 10px 12px;vertical-align:top;border-bottom:1px solid rgba(255,255,255,0.1);">
+            <div style="font-size:13px;font-weight:700;color:#ffffff;margin-bottom:2px;">${label}</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);line-height:1.6;">${body}</div>
           </td>
         </tr>`).join("")}
       </table>
