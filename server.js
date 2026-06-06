@@ -400,28 +400,31 @@ function passwordResetEmailHtml(resetUrl) {
 function welcomeEmailHtml(username) {
   return baseEmail(`
     <div style="margin-top:28px;">
-      <div style="font-size:10px;font-weight:700;color:rgba(238,234,226,0.3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Welcome</div>
-      <div style="font-size:24px;font-weight:800;color:#eeeae2;letter-spacing:-.3px;line-height:1.25;margin-bottom:16px;">You're in, @${username}.</div>
-      <p style="font-size:14px;color:rgba(238,234,226,0.5);line-height:1.75;margin:0 0 28px;">Upload a beat and we'll scan it immediately across all major platforms. Your beat gets stored and rescanned daily — we'll email you the moment something is detected.</p>
+      <div style="font-size:10px;font-weight:700;color:rgba(238,234,226,0.3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:12px;">Welcome</div>
+      <div style="font-size:26px;font-weight:800;color:#eeeae2;letter-spacing:-.4px;line-height:1.2;margin-bottom:16px;">You're in, @${username}.</div>
+      <p style="font-size:14px;color:rgba(238,234,226,0.45);line-height:1.8;margin:0 0 28px;">Right now your beats have no identifier on the internet — that's why placements are hard to track. Upload one and we assign it a unique ID, scan it immediately across all major platforms, and email you the moment it surfaces anywhere.</p>
 
-      <div style="display:flex;flex-direction:column;gap:0;border:1px solid rgba(255,255,255,0.08);border-radius:12px;overflow:hidden;margin-bottom:28px;">
+      <div style="height:1px;background:rgba(255,255,255,0.07);margin-bottom:24px;"></div>
+
+      <table width="100%" cellpadding="0" cellspacing="0">
         ${[
-          ["🪪","Fingerprint on upload","Stored and rescanned daily against major platform catalogs."],
-          ["🔍","Instant scan","Checked across Spotify, Apple Music, YouTube, TikTok & more the moment you submit."],
-          ["📡","Daily monitoring","We run your library every day and email you when something matches."],
-          ["✓","Verified catalog","Confirm matches and build a shareable placement history."],
-        ].map(([icon, label, body], i) => `
-        <div style="display:flex;gap:14px;align-items:flex-start;padding:16px 18px;${i > 0 ? "border-top:1px solid rgba(255,255,255,0.06);" : ""}background:rgba(255,255,255,0.02);">
-          <div style="font-size:16px;flex-shrink:0;margin-top:1px;">${icon}</div>
-          <div>
-            <div style="font-size:13px;font-weight:700;color:#eeeae2;margin-bottom:3px;">${label}</div>
-            <div style="font-size:12px;color:rgba(238,234,226,0.4);line-height:1.6;">${body}</div>
-          </div>
-        </div>`).join("")}
-      </div>
+          ["🪪","Fingerprint","Assigned the moment you upload. Stored permanently."],
+          ["🔍","Instant scan","Checked across Spotify, Apple Music, YouTube, TikTok & more."],
+          ["📡","Daily rescan","We run your library every day and email you when something matches."],
+          ["✓","Verified catalog","Confirmed placements logged and shareable."],
+        ].map(([icon, label, body]) => `
+        <tr>
+          <td style="padding:10px 0;vertical-align:top;width:28px;font-size:15px;">${icon}</td>
+          <td style="padding:10px 0 10px 12px;vertical-align:top;border-bottom:1px solid rgba(255,255,255,0.06);">
+            <div style="font-size:13px;font-weight:700;color:#eeeae2;margin-bottom:2px;">${label}</div>
+            <div style="font-size:12px;color:rgba(238,234,226,0.38);line-height:1.6;">${body}</div>
+          </td>
+        </tr>`).join("")}
+      </table>
 
-      <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 24px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Scan your first beat ↗</a>
-      <p style="margin:20px 0 0;font-size:12px;color:rgba(238,234,226,0.2);line-height:1.6;">Questions? <a href="mailto:support@trackmyplacements.com" style="color:rgba(238,234,226,0.35);text-decoration:underline;">support@trackmyplacements.com</a></p>
+      <div style="margin-top:28px;">
+        <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 28px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Scan your first beat ↗</a>
+      </div>
     </div>
   `);
 }
@@ -721,6 +724,15 @@ app.post("/scan", (req, res, next) => {
     const clientKey = req.body.client_key || null;
     const clientBpm = req.body.client_bpm ? parseFloat(req.body.client_bpm) : null;
 
+    // Pull producer_since from profile to filter out pre-career results
+    let producerSinceYear = null;
+    if (user_id) {
+      try {
+        const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
+        producerSinceYear = profiles?.[0]?.producer_since ? parseInt(profiles[0].producer_since) : null;
+      } catch(e) { /* non-fatal */ }
+    }
+
     // Extract BPM from filename — producers commonly include it at the end
     // Matches patterns like: "mysong 140bpm.mp3", "beat_95 BPM.wav", "trap140.mp3", "[140]", "(95bpm)"
     let filenameBpm = null;
@@ -755,6 +767,14 @@ app.post("/scan", (req, res, next) => {
           const title = (m.title || "").toLowerCase().trim();
           if (BAD_TITLES.includes(title)) return false;
           if (title.includes("untitled")) return false;
+          // Filter out releases that predate when the user started producing
+          if (producerSinceYear) {
+            const releaseDate = m.release_date || m.external_metadata?.spotify?.album?.release_date || null;
+            if (releaseDate) {
+              const releaseYear = new Date(releaseDate).getFullYear();
+              if (!isNaN(releaseYear) && releaseYear < producerSinceYear) return false;
+            }
+          }
           return true;
         }
         const rawMatched = acrData?.status?.code === 0;
@@ -1089,6 +1109,15 @@ app.get("/profile/:user_id", async (req, res) => {
   catch(err) { res.status(500).json({ error:err.message }); }
 });
 
+app.post("/profile/producer-since", async (req, res) => {
+  try {
+    const { user_id, producer_since } = req.body;
+    if (!user_id || !producer_since) return res.status(400).json({ error:"Missing fields." });
+    await sbUpdate("profiles", `id=eq.${user_id}`, { producer_since: parseInt(producer_since) });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Rescan (twice daily) ───────────────────────────────────────
 // Hit POST /rescan with header x-rescan-secret on a cron schedule.
 // Recommended: 0 6 * * * and 0 18 * * * (6am + 6pm UTC) for ~12h detection window.
@@ -1118,6 +1147,12 @@ app.post("/rescan", async (req, res) => {
         if (!status.hasAccess) { console.log(`Skipping ${beat.id} — no access`); skipped++; continue; }
         const buffer=await storageDownload(beat.storage_path);
         if (!buffer) { skipped++; continue; }
+        // Pull producer_since for this user to filter pre-career results
+        let rescanProducerSince = null;
+        try {
+          const rProfiles = await sbSelect("profiles", `id=eq.${beat.user_id}`);
+          rescanProducerSince = rProfiles?.[0]?.producer_since ? parseInt(rProfiles[0].producer_since) : null;
+        } catch(e) { /* non-fatal */ }
         const acrData=await scanAllEngines(buffer, beat.filename, "audio/mpeg");
         const rawMatched = acrData?.status?.code===0;
         const scanMusic  = acrData?.metadata?.music || [];
@@ -1127,6 +1162,13 @@ app.post("/rescan", async (req, res) => {
           const t = (m.title||"").toLowerCase().trim();
           const badT = ["unknown","untitled","","no title","n/a","na","null","undefined"];
           if (badT.includes(t)||t.includes("untitled")) return false;
+          if (rescanProducerSince) {
+            const releaseDate = m.release_date || m.external_metadata?.spotify?.album?.release_date || null;
+            if (releaseDate) {
+              const releaseYear = new Date(releaseDate).getFullYear();
+              if (!isNaN(releaseYear) && releaseYear < rescanProducerSince) return false;
+            }
+          }
           return true;
         }
         const goodRescanMusic = rawMatched ? scanMusic.filter(isGoodRescanMatch) : [];
