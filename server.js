@@ -115,13 +115,12 @@ async function storageDelete(path) {
 }
 
 // ── Audio segment slicer ──────────────────────────────────────
-// 5 slices at music-structure-aware positions:
-//   10% — just past the intro
-//   28% — first verse/hook entry
-//   50% — mid-track hook (most distinctive)
-//   75% — second chorus / bridge
-//   90% — late verse / outro drop
-// All slices are ~25s (bumped from 20s — more waveform = higher confidence).
+// 4 slices at music-structure-aware positions:
+//   15% — just past the intro
+//   38% — first verse/hook entry
+//   62% — mid-track hook (most distinctive)
+//   85% — second chorus / outro drop
+// All slices are ~25s — more waveform = higher confidence.
 // Short files skip slicing and send as-is.
 // Medium files also get a full-buffer pass for maximum coverage.
 const SLICE_BYTES    = 32 * 1024 * 25;  // ~25s at 256kbps equiv
@@ -131,7 +130,7 @@ function getSlices(buffer) {
   if (buffer.length <= MIN_SCAN_BYTES) return [buffer];
   const s   = SLICE_BYTES;
   const len = buffer.length;
-  const offsets = [0.10, 0.28, 0.50, 0.75, 0.90].map(p => Math.floor(len * p));
+  const offsets = [0.15, 0.38, 0.62, 0.85].map(p => Math.floor(len * p));
   const slices = offsets.map(o => buffer.slice(o, Math.min(o + s, len)));
   // Also include the full buffer as an extra pass for shorter tracks
   if (len <= FULL_PASS_MAX) slices.push(buffer);
@@ -482,24 +481,29 @@ app.get("/", (req, res) => res.json({
 }));
 
 // ── Auth: sign up ─────────────────────────────────────────────
+const DEV_EMAILS = ["montemadeahit@gmail.com"];
+
 app.post("/auth/signup", async (req, res) => {
   try {
     const { username, email, password } = req.body;
     if (!username||!email||!password) return res.status(400).json({ error:"All fields required." });
 
+    const isDev = DEV_EMAILS.includes((email||"").toLowerCase().trim());
     const ip = getIP(req);
-    if (!checkSignupRate(ip)) return res.status(429).json({ error:"Too many accounts created from this connection. Try again later." });
+    if (!isDev && !checkSignupRate(ip)) return res.status(429).json({ error:"Too many accounts created from this connection. Try again later." });
 
     const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
     if (Array.isArray(existing)&&existing.length>0) return res.status(400).json({ error:"Username already taken." });
 
-    // Block if this IP already has an active trial
-    const ipProfiles = await sbSelect("profiles", `signup_ip=eq.${encodeURIComponent(ip)}`);
-    if (Array.isArray(ipProfiles)&&ipProfiles.length>0) {
-      for (const p of ipProfiles) {
-        if (p.subscription_status==="active") continue;
-        const te = new Date((p.trial_start ? new Date(p.trial_start) : new Date(p.created_at)).getTime() + 3*24*60*60*1000);
-        if (new Date() < te) return res.status(429).json({ error:"A free trial is already active from this network. Subscribe to continue." });
+    // Block if this IP already has an active trial — skip for dev
+    if (!isDev) {
+      const ipProfiles = await sbSelect("profiles", `signup_ip=eq.${encodeURIComponent(ip)}`);
+      if (Array.isArray(ipProfiles)&&ipProfiles.length>0) {
+        for (const p of ipProfiles) {
+          if (p.subscription_status==="active") continue;
+          const te = new Date((p.trial_start ? new Date(p.trial_start) : new Date(p.created_at)).getTime() + 3*24*60*60*1000);
+          if (new Date() < te) return res.status(429).json({ error:"A free trial is already active from this network. Subscribe to continue." });
+        }
       }
     }
 
@@ -624,6 +628,47 @@ app.post("/auth/reset-password", async (req, res) => {
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
+// ── Support / Feedback ────────────────────────────────────────
+app.post("/support", async (req, res) => {
+  try {
+    const { name, email, message, username, userId } = req.body;
+    if (!message || !message.trim()) return res.status(400).json({ error: "Message required." });
+
+    const html = `
+      <div style="font-family:sans-serif;max-width:560px;color:#1a1a1a;">
+        <div style="background:#f4f4f5;border-radius:10px;padding:20px 24px;margin-bottom:16px;">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#888;margin-bottom:8px;">From</div>
+          <div style="font-size:15px;font-weight:600;">${name||"Anonymous"}</div>
+          ${email ? `<div style="font-size:13px;color:#555;margin-top:2px;">${email}</div>` : ""}
+          ${userId ? `<div style="font-size:11px;color:#aaa;margin-top:4px;">User ID: ${userId}</div>` : ""}
+        </div>
+        <div style="background:#ffffff;border:1px solid #e4e4e7;border-radius:10px;padding:20px 24px;">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#888;margin-bottom:10px;">Message</div>
+          <div style="font-size:15px;line-height:1.75;white-space:pre-wrap;">${message.trim()}</div>
+        </div>
+        <div style="margin-top:12px;font-size:11px;color:#aaa;">Sent via TrackMyPlacements support form</div>
+      </div>
+    `;
+
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
+      body: JSON.stringify({
+        from: FROM_EMAIL,
+        to: "trackmyplacements@gmail.com",
+        reply_to: email || FROM_EMAIL,
+        subject: `Support: ${name || username || "Anonymous"} — ${message.trim().slice(0, 60)}${message.length > 60 ? "…" : ""}`,
+        html,
+      }),
+    });
+
+    res.json({ ok: true });
+  } catch(e) {
+    console.error("Support email error:", e.message);
+    res.status(500).json({ error: "Failed to send. Try again." });
+  }
+});
+
 // ── Scan ──────────────────────────────────────────────────────
 app.post("/scan", (req, res, next) => {
   upload.single("file")(req, res, (err) => {
@@ -643,6 +688,16 @@ app.post("/scan", (req, res, next) => {
       const status = await getSubscriptionStatus(user_id);
       if (!status.hasAccess) return res.status(403).json({ error: status.pastDue ? "Your payment is past due. Please update billing to continue scanning." : "Your free trial has ended. Subscribe to continue scanning." });
       if (status.submissionLimit!==null && status.submissionsUsed>=status.submissionLimit) return res.status(403).json({ error:`Submission limit reached (${status.submissionsUsed}/${status.submissionLimit}). Upgrade to scan more beats.` });
+
+      // Daily upload cap — protects against bulk abuse on unlimited plans
+      // 50 beats/day is well above any real producer's daily workflow
+      const DAILY_CAP = 50;
+      const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+      const todayBeats = await sbSelect("beats", `user_id=eq.${user_id}&created_at=gte.${todayStart.toISOString()}`);
+      if (Array.isArray(todayBeats) && todayBeats.length >= DAILY_CAP) {
+        return res.status(429).json({ error:`Daily limit of ${DAILY_CAP} uploads reached. Come back tomorrow.` });
+      }
+
       const existing = await sbSelect("beats", `user_id=eq.${user_id}&filename=eq.${encodeURIComponent(req.file.originalname)}`);
       if (Array.isArray(existing)&&existing.length>0) return res.status(400).json({ error:`"${req.file.originalname}" has already been submitted.` });
     }
