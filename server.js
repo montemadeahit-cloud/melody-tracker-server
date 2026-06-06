@@ -637,12 +637,16 @@ app.post("/support", async (req, res) => {
     const { name, email, message, username, userId } = req.body;
     if (!message || !message.trim()) return res.status(400).json({ error: "Message required." });
 
+    const senderName  = name || username || "Anonymous";
+    const replyEmail  = email || null;
+    const subject     = `Support: ${senderName} — ${message.trim().slice(0, 60)}${message.trim().length > 60 ? "…" : ""}`;
+
     const html = `
       <div style="font-family:sans-serif;max-width:560px;color:#1a1a1a;">
         <div style="background:#f4f4f5;border-radius:10px;padding:20px 24px;margin-bottom:16px;">
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#888;margin-bottom:8px;">From</div>
-          <div style="font-size:15px;font-weight:600;">${name||"Anonymous"}</div>
-          ${email ? `<div style="font-size:13px;color:#555;margin-top:2px;">${email}</div>` : ""}
+          <div style="font-size:15px;font-weight:600;">${senderName}</div>
+          ${replyEmail ? `<div style="font-size:13px;color:#555;margin-top:2px;">${replyEmail}</div>` : ""}
           ${userId ? `<div style="font-size:11px;color:#aaa;margin-top:4px;">User ID: ${userId}</div>` : ""}
         </div>
         <div style="background:#ffffff;border:1px solid #e4e4e7;border-radius:10px;padding:20px 24px;">
@@ -653,29 +657,40 @@ app.post("/support", async (req, res) => {
       </div>
     `;
 
-    // Send to your own verified domain email — Resend can only deliver to verified domains
-    // on free/starter plans. Forward from support@ to your Gmail in your DNS settings.
+    if (!RESEND_KEY) {
+      console.warn("Support email skipped — RESEND_KEY not set.");
+      return res.json({ ok: true }); // Don't block the user if email isn't configured
+    }
+
+    // Always send to the FROM_EMAIL address (verified sender domain) — avoids Resend
+    // "can only send to your own email" restriction on free plans.
+    // Set reply_to so you can reply directly to the user from your inbox.
     const payload = {
-      from: FROM_EMAIL,
-      to: ["support@trackmyplacements.com"],
-      subject: `Support: ${name || username || "Anonymous"} — ${message.trim().slice(0, 60)}${message.length > 60 ? "…" : ""}`,
+      from:    FROM_EMAIL,
+      to:      [FROM_EMAIL],
+      subject,
       html,
-      ...(email ? { reply_to: email } : {}),
+      ...(replyEmail ? { reply_to: replyEmail } : {}),
     };
 
     const r = await fetch("https://api.resend.com/emails", {
-      method: "POST",
+      method:  "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
-      body: JSON.stringify(payload),
+      body:    JSON.stringify(payload),
     });
     const d = await r.json();
-    console.log("Support email response:", JSON.stringify(d));
+    console.log("Support email response:", r.status, JSON.stringify(d));
 
-    if (!r.ok) return res.status(500).json({ error: d.message || d.name || "Resend error" });
+    if (!r.ok) {
+      // Log the real error for debugging but never expose it to the user
+      console.error("Resend error sending support email:", JSON.stringify(d));
+      return res.status(500).json({ error: "send_failed" });
+    }
+
     res.json({ ok: true });
   } catch(e) {
     console.error("Support email error:", e.message);
-    res.status(500).json({ error: e.message || "Failed to send. Try again." });
+    res.status(500).json({ error: "send_failed" });
   }
 });
 
