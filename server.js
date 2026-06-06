@@ -480,6 +480,8 @@ app.get("/", (req, res) => res.json({
   stripeWebhook:!!STRIPE_WEBHOOK,
   resend:!!RESEND_KEY,
   shazam:!!RAPIDAPI_KEY,
+  spotifyId:!!process.env.SPOTIFY_CLIENT_ID,
+  spotifySecret:!!process.env.SPOTIFY_CLIENT_SECRET,
   appUrl:APP_URL,
 }));
 
@@ -738,6 +740,41 @@ app.get("/spotify-track/:id", async (req, res) => {
       spotifyUrl:  t.external_urls?.spotify || `https://open.spotify.com/track/${t.id}`,
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Manual placement verification (user-submitted Spotify link) ──
+// When a scan finds NO match but the producer knows where the beat is
+// placed, they paste the Spotify link in the UI. The frontend verifies
+// it via /spotify-track, then calls this to PERSIST it onto the beat
+// record — flipping status to "placed" and storing the DSP data so it
+// becomes a real, durable placement (visible in Library, survives reload).
+app.post("/verify-placement", async (req, res) => {
+  try {
+    const { user_id, fingerprint_id, beat_id, spotify_id, title, artist } = req.body;
+    if (!user_id || (!fingerprint_id && !beat_id)) return res.status(400).json({ error: "Missing user_id and a beat reference (fingerprint_id or beat_id)." });
+    if (!title) return res.status(400).json({ error: "Missing track title." });
+
+    // Locate the beat — by id if provided, otherwise by its permanent fingerprint
+    let beats;
+    if (beat_id) {
+      beats = await sbSelect("beats", `id=eq.${beat_id}&user_id=eq.${user_id}`);
+    } else {
+      beats = await sbSelect("beats", `user_id=eq.${user_id}&fingerprint_id=eq.${encodeURIComponent(fingerprint_id)}`);
+    }
+    if (!Array.isArray(beats) || beats.length === 0) return res.status(404).json({ error: "Beat not found for this user." });
+    const beat = beats[0];
+
+    // Only writes columns we know exist (same ones the /scan insert uses)
+    const updated = await sbUpdate("beats", `id=eq.${beat.id}`, {
+      status:       "placed",
+      last_result:  title,
+      last_artist:  artist || null,
+      spotify_id:   spotify_id || null,
+      last_scanned: new Date().toISOString(),
+    });
+    console.log("Manual placement verified:", beat.id, "→", title, spotify_id || "(no spotify id)");
+    res.json({ success: true, beat: Array.isArray(updated) ? updated[0] : (updated || { id: beat.id }) });
+  } catch (e) { console.error("verify-placement error:", e.message); res.status(500).json({ error: e.message }); }
 });
 
 // ── Scan ──────────────────────────────────────────────────────
