@@ -650,22 +650,29 @@ app.post("/support", async (req, res) => {
       </div>
     `;
 
-    await fetch("https://api.resend.com/emails", {
+    // Send to your own verified domain email — Resend can only deliver to verified domains
+    // on free/starter plans. Forward from support@ to your Gmail in your DNS settings.
+    const payload = {
+      from: FROM_EMAIL,
+      to: ["support@trackmyplacements.com"],
+      subject: `Support: ${name || username || "Anonymous"} — ${message.trim().slice(0, 60)}${message.length > 60 ? "…" : ""}`,
+      html,
+      ...(email ? { reply_to: email } : {}),
+    };
+
+    const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
-      body: JSON.stringify({
-        from: FROM_EMAIL,
-        to: "trackmyplacements@gmail.com",
-        reply_to: email || FROM_EMAIL,
-        subject: `Support: ${name || username || "Anonymous"} — ${message.trim().slice(0, 60)}${message.length > 60 ? "…" : ""}`,
-        html,
-      }),
+      body: JSON.stringify(payload),
     });
+    const d = await r.json();
+    console.log("Support email response:", JSON.stringify(d));
 
+    if (!r.ok) return res.status(500).json({ error: d.message || d.name || "Resend error" });
     res.json({ ok: true });
   } catch(e) {
     console.error("Support email error:", e.message);
-    res.status(500).json({ error: "Failed to send. Try again." });
+    res.status(500).json({ error: e.message || "Failed to send. Try again." });
   }
 });
 
