@@ -26,7 +26,7 @@ const SUPABASE_URL     = process.env.SUPABASE_URL;
 const SUPABASE_KEY     = process.env.SUPABASE_KEY;
 const SUPABASE_SERVICE = process.env.SUPABASE_SERVICE_KEY;
 const RESEND_KEY       = process.env.RESEND_API_KEY;
-const FROM_EMAIL       = process.env.FROM_EMAIL || "alerts@trackmyplacements.com";
+const FROM_EMAIL       = process.env.FROM_EMAIL || "TrackMyPlacements <alerts@trackmyplacements.com>";
 const RESCAN_SECRET    = process.env.RESCAN_SECRET || "rescan-secret";
 const STRIPE_KEY       = process.env.STRIPE_SECRET_KEY;
 const STRIPE_PRICE_T1  = process.env.STRIPE_PRICE_ID;
@@ -347,125 +347,84 @@ async function sendEmail(to, subject, html) {
 }
 
 function baseEmail(content) {
-  return `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#16161a;color:#f0ece4;border-radius:16px;">
-    <div style="font-size:22px;font-weight:700;margin-bottom:4px;">TrackMy<span style="color:#F5A800;">Placements</span></div>
-    <div style="font-size:11px;color:#6b7385;letter-spacing:.1em;text-transform:uppercase;margin-bottom:28px;">Placement Location Engine</div>
-    ${content}
-    <div style="margin-top:28px;padding-top:20px;border-top:1px solid rgba(255,255,255,0.07);font-size:11px;color:#6b7385;">
-      <a href="${APP_URL}" style="color:#F5A800;">trackmyplacements.com</a>
-    </div>
-  </div>`;
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
+  <body style="margin:0;padding:0;background:#050506;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#050506;padding:40px 16px;">
+    <tr><td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:linear-gradient(180deg,#0f0f13 0%,#0a0a0d 100%);border:1px solid #1e1e28;border-top:1px solid #2a2a36;border-radius:20px;overflow:hidden;">
+        <tr><td style="height:3px;background:linear-gradient(90deg,#ffffff,#cccccc);font-size:0;">&nbsp;</td></tr>
+        <tr><td style="padding:32px 36px 0;">
+          <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:16px;font-weight:700;color:#e8e4dc;letter-spacing:-.2px;">TrackMy<span style="color:#ffffff;">Placements</span></div>
+        </td></tr>
+        <tr><td style="padding:0 36px 32px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+          ${content}
+        </td></tr>
+        <tr><td style="padding:20px 36px;border-top:1px solid rgba(255,255,255,0.06);">
+          <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:11px;color:rgba(238,234,226,0.2);line-height:1.7;">
+            <a href="${APP_URL}" style="color:rgba(238,234,226,0.3);text-decoration:none;font-weight:600;">trackmyplacements.com</a> &nbsp;·&nbsp; Placement Location Engine
+          </div>
+        </td></tr>
+        <tr><td style="height:3px;background:linear-gradient(90deg,#ffffff,#cccccc);font-size:0;">&nbsp;</td></tr>
+      </table>
+    </td></tr>
+  </table>
+  </body></html>`;
 }
 
 function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
   const link = spotifyId ? `https://open.spotify.com/track/${spotifyId}` : youtubeId ? `https://youtube.com/watch?v=${youtubeId}` : null;
   return baseEmail(`
-    <div style="background:rgba(245,168,0,0.08);border:1px solid rgba(245,168,0,0.2);border-radius:12px;padding:20px;margin-bottom:20px;">
-      <div style="font-size:13px;color:#F5A800;margin-bottom:10px;text-transform:uppercase;letter-spacing:.08em;">Placement detected</div>
-      <div style="font-size:18px;font-weight:700;margin-bottom:4px;">${title}</div>
-      <div style="font-size:14px;color:rgba(240,236,228,0.6);">${artist||"Unknown artist"}</div>
+    <div style="margin-top:28px;padding:20px 22px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-top:1px solid rgba(255,255,255,0.14);border-radius:14px;margin-bottom:24px;">
+      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Placement detected</div>
+      <div style="font-size:22px;font-weight:800;color:#eeeae2;letter-spacing:-.3px;margin-bottom:4px;">${title}</div>
+      <div style="font-size:14px;color:rgba(238,234,226,0.45);margin-bottom:0;">${artist || "Unknown artist"}</div>
     </div>
-    <div style="font-size:13px;color:rgba(240,236,228,0.6);margin-bottom:6px;">Your beat</div>
-    <div style="font-size:14px;font-weight:600;margin-bottom:20px;">${filename}</div>
-    ${link?`<a href="${link}" style="display:inline-block;background:#F5A800;color:#0e0e10;font-weight:700;font-size:14px;padding:12px 24px;border-radius:10px;text-decoration:none;">Listen to the track ↗</a>`:""}
+    <div style="font-size:11px;font-weight:600;color:rgba(238,234,226,0.3);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;">Your beat</div>
+    <div style="font-size:14px;font-weight:600;color:#e8e4dc;margin-bottom:28px;">${filename}</div>
+    ${link ? `<a href="${link}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 24px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Listen to the track ↗</a>` : ""}
+    <p style="margin:24px 0 0;font-size:12px;color:rgba(238,234,226,0.25);line-height:1.7;">Head to your TrackMyPlacements dashboard to verify this placement and add it to your catalog.</p>
   `);
 }
 
 function passwordResetEmailHtml(resetUrl) {
   return baseEmail(`
-    <div style="font-size:18px;font-weight:700;margin-bottom:12px;">Reset your password</div>
-    <p style="font-size:14px;color:rgba(240,236,228,0.7);line-height:1.7;margin-bottom:24px;">We received a request to reset your password. This link expires in <strong style="color:#f0ece4;">1 hour</strong>.</p>
-    <a href="${resetUrl}" style="display:inline-block;background:#F5A800;color:#0e0e10;font-weight:700;font-size:14px;padding:12px 24px;border-radius:10px;text-decoration:none;">Reset my password ↗</a>
-    <p style="margin-top:20px;font-size:12px;color:#6b7385;">If you didn't request this, ignore this email.</p>
+    <div style="margin-top:28px;margin-bottom:8px;">
+      <div style="font-size:10px;font-weight:700;color:rgba(238,234,226,0.3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Account</div>
+      <div style="font-size:22px;font-weight:800;color:#eeeae2;letter-spacing:-.3px;margin-bottom:12px;">Reset your password</div>
+      <p style="font-size:14px;color:rgba(238,234,226,0.5);line-height:1.75;margin:0 0 28px;">Click the button below to set a new password. This link expires in <span style="color:#e8e4dc;font-weight:600;">1 hour</span>.</p>
+      <a href="${resetUrl}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 24px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Reset my password ↗</a>
+      <p style="margin:20px 0 0;font-size:12px;color:rgba(238,234,226,0.2);line-height:1.6;">Didn't request this? You can safely ignore this email.</p>
+    </div>
   `);
 }
 
 function welcomeEmailHtml(username) {
-  return `<div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;background:#0e0f14;border-radius:20px;overflow:hidden;border:1px solid rgba(255,255,255,0.07);">
+  return baseEmail(`
+    <div style="margin-top:28px;">
+      <div style="font-size:10px;font-weight:700;color:rgba(238,234,226,0.3);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Welcome</div>
+      <div style="font-size:24px;font-weight:800;color:#eeeae2;letter-spacing:-.3px;line-height:1.25;margin-bottom:16px;">You're in, @${username}.</div>
+      <p style="font-size:14px;color:rgba(238,234,226,0.5);line-height:1.75;margin:0 0 28px;">Upload a beat and we'll scan it immediately across all major platforms. Your beat gets stored and rescanned daily — we'll email you the moment something is detected.</p>
 
-    <!-- Header bar -->
-    <div style="height:4px;background:linear-gradient(90deg,#ffffff,#cccccc);"></div>
-
-    <!-- Logo + hero -->
-    <div style="padding:36px 36px 28px;border-bottom:1px solid rgba(255,255,255,0.07);">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:28px;">
-        <div style="font-size:20px;font-weight:800;color:#eeeae2;letter-spacing:-.3px;">TrackMy<span style="color:#ffffff;">Placements</span></div>
-      </div>
-      <div style="font-size:13px;font-weight:700;color:rgba(255,255,255,0.4);letter-spacing:.12em;text-transform:uppercase;margin-bottom:12px;">Welcome to the platform</div>
-      <div style="font-size:26px;font-weight:800;color:#eeeae2;line-height:1.25;margin-bottom:16px;letter-spacing:-.4px;">
-        Your beats are now being watched, @${username}.
-      </div>
-      <p style="font-size:15px;color:rgba(238,234,226,0.65);line-height:1.75;margin:0;">
-        As a producer, your work leaves fingerprints everywhere it goes — but without the right tools, placements disappear into the noise. TrackMyPlacements exists to change that.
-      </p>
-    </div>
-
-    <!-- What we do -->
-    <div style="padding:28px 36px;border-bottom:1px solid rgba(255,255,255,0.07);">
-      <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.12em;text-transform:uppercase;margin-bottom:18px;">How it works</div>
-
-      <div style="display:flex;flex-direction:column;gap:14px;">
-        <div style="display:flex;gap:14px;align-items:flex-start;">
-          <div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">🪪</div>
+      <div style="display:flex;flex-direction:column;gap:0;border:1px solid rgba(255,255,255,0.08);border-radius:12px;overflow:hidden;margin-bottom:28px;">
+        ${[
+          ["🪪","Fingerprint on upload","Stored and rescanned daily against major platform catalogs."],
+          ["🔍","Instant scan","Checked across Spotify, Apple Music, YouTube, TikTok & more the moment you submit."],
+          ["📡","Daily monitoring","We run your library every day and email you when something matches."],
+          ["✓","Verified catalog","Confirm matches and build a shareable placement history."],
+        ].map(([icon, label, body], i) => `
+        <div style="display:flex;gap:14px;align-items:flex-start;padding:16px 18px;${i > 0 ? "border-top:1px solid rgba(255,255,255,0.06);" : ""}background:rgba(255,255,255,0.02);">
+          <div style="font-size:16px;flex-shrink:0;margin-top:1px;">${icon}</div>
           <div>
-            <div style="font-size:14px;font-weight:700;color:#eeeae2;margin-bottom:3px;">Permanent fingerprint registration</div>
-            <div style="font-size:13px;color:rgba(238,234,226,0.55);line-height:1.65;">Every beat you upload gets assigned a unique digital ID — stored in our system forever. Your work is on record from the moment you submit it.</div>
+            <div style="font-size:13px;font-weight:700;color:#eeeae2;margin-bottom:3px;">${label}</div>
+            <div style="font-size:12px;color:rgba(238,234,226,0.4);line-height:1.6;">${body}</div>
           </div>
-        </div>
-
-        <div style="display:flex;gap:14px;align-items:flex-start;">
-          <div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">🔍</div>
-          <div>
-            <div style="font-size:14px;font-weight:700;color:#eeeae2;margin-bottom:3px;">Instant scan on submission</div>
-            <div style="font-size:13px;color:rgba(238,234,226,0.55);line-height:1.65;">The moment you upload, we cross-reference your audio against Spotify, Apple Music, YouTube, TikTok, Deezer, and more using audio fingerprint matching — the same technology used by the industry.</div>
-          </div>
-        </div>
-
-        <div style="display:flex;gap:14px;align-items:flex-start;">
-          <div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">📡</div>
-          <div>
-            <div style="font-size:14px;font-weight:700;color:#eeeae2;margin-bottom:3px;">Daily monitoring — automatic alerts</div>
-            <div style="font-size:13px;color:rgba(238,234,226,0.55);line-height:1.65;">We rescan your library every day. If a new song containing your beat surfaces on any platform, we email you immediately — so you never find out late.</div>
-          </div>
-        </div>
-
-        <div style="display:flex;gap:14px;align-items:flex-start;">
-          <div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">✓</div>
-          <div>
-            <div style="font-size:14px;font-weight:700;color:#eeeae2;margin-bottom:3px;">Build your verified catalog</div>
-            <div style="font-size:13px;color:rgba(238,234,226,0.55);line-height:1.65;">Confirm matches and build a shareable, verified placement history — your proof of work for labels, managers, and licensing conversations.</div>
-          </div>
-        </div>
+        </div>`).join("")}
       </div>
-    </div>
 
-    <!-- Trial info -->
-    <div style="padding:24px 36px;border-bottom:1px solid rgba(255,255,255,0.07);background:rgba(255,255,255,0.02);">
-      <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px;">Your free trial</div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <div style="padding:10px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;font-size:13px;color:#eeeae2;font-weight:600;">25 beat scans</div>
-        <div style="padding:10px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;font-size:13px;color:#eeeae2;font-weight:600;">Daily monitoring</div>
-        <div style="padding:10px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;font-size:13px;color:#eeeae2;font-weight:600;">Verified catalog</div>
-      </div>
-      <p style="margin:14px 0 0;font-size:12px;color:rgba(238,234,226,0.35);line-height:1.6;">Detection depends on how and when the song was released and indexed on each platform. Your fingerprint is registered immediately — anything that surfaces after submission will be caught.</p>
+      <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 24px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Scan your first beat ↗</a>
+      <p style="margin:20px 0 0;font-size:12px;color:rgba(238,234,226,0.2);line-height:1.6;">Questions? <a href="mailto:support@trackmyplacements.com" style="color:rgba(238,234,226,0.35);text-decoration:underline;">support@trackmyplacements.com</a></p>
     </div>
-
-    <!-- CTA -->
-    <div style="padding:28px 36px 32px;">
-      <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#0e0e10;font-weight:800;font-size:14px;padding:14px 28px;border-radius:12px;text-decoration:none;letter-spacing:.04em;">Scan your first beat ↗</a>
-      <p style="margin:20px 0 0;font-size:12px;color:rgba(238,234,226,0.3);line-height:1.6;">Questions? Reply to this email or reach us at <a href="mailto:support@trackmyplacements.com" style="color:rgba(238,234,226,0.5);">support@trackmyplacements.com</a></p>
-    </div>
-
-    <!-- Footer -->
-    <div style="padding:16px 36px;background:rgba(0,0,0,0.3);border-top:1px solid rgba(255,255,255,0.05);">
-      <div style="font-size:11px;color:rgba(238,234,226,0.2);line-height:1.7;">
-        <a href="${APP_URL}" style="color:rgba(238,234,226,0.3);text-decoration:none;font-weight:600;">trackmyplacements.com</a> · Placement Location Engine<br/>
-        You're receiving this because you just created an account.
-      </div>
-    </div>
-
-    <div style="height:3px;background:linear-gradient(90deg,#ffffff,#cccccc);"></div>
-  </div>`;
+  `);
 }
 
 // ── Subscription status ───────────────────────────────────────
