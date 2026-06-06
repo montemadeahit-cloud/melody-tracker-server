@@ -719,7 +719,7 @@ async function getSpotifyToken() {
 
 app.get("/spotify-track/:id", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id.split("?")[0].split("#")[0];
     if (!id || !/^[A-Za-z0-9]{10,30}$/.test(id)) return res.status(400).json({ error: "Invalid track ID." });
     const token = await getSpotifyToken();
     if (!token) return res.status(503).json({ error: "Spotify lookup unavailable." });
