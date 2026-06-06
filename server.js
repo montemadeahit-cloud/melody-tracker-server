@@ -787,6 +787,18 @@ app.post("/scan", (req, res, next) => {
           duration_ms:    durationMs || null,
         });
 
+        // Also append to a permanent fingerprint log on the profile — survives beat deletion
+        try {
+          const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
+          const profile  = profiles?.[0];
+          const existing = profile?.fingerprint_log || [];
+          const entry    = { id: fingerprintId, hash: audioHash, filename: req.file.originalname, registered_at: new Date().toISOString() };
+          // Only add if not already in the log (idempotent)
+          if (!existing.find(function(e){ return e.id === fingerprintId; })) {
+            await sbUpdate("profiles", `id=eq.${user_id}`, { fingerprint_log: [...existing, entry] });
+          }
+        } catch(logErr) { console.error("Fingerprint log error (non-fatal):", logErr.message); }
+
         // Increment submission counter
         const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
         const profile   = profiles?.[0];
@@ -1155,4 +1167,10 @@ app.post("/rescan", async (req, res) => {
   } catch(e) { console.error("Rescan error:",e.message); res.status(500).json({ error:e.message }); }
 });
 
-app.listen(port, "0.0.0.0", ()=>console.log(`Server listening on 0.0.0.0:${port}`));
+app.listen(port, "0.0.0.0", () => {
+  console.log(`Server listening on 0.0.0.0:${port}`);
+  // IMPORTANT: profiles table needs a `fingerprint_log` JSONB column.
+  // Run this in Supabase SQL editor if not already added:
+  // ALTER TABLE profiles ADD COLUMN IF NOT EXISTS fingerprint_log JSONB DEFAULT '[]'::jsonb;
+  console.log("Note: ensure profiles.fingerprint_log JSONB column exists in Supabase.");
+});
