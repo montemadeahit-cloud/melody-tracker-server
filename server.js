@@ -679,6 +679,52 @@ app.post("/support", async (req, res) => {
   }
 });
 
+// ── Spotify track lookup (for user-submitted links) ──────────
+const SPOTIFY_CLIENT_ID     = process.env.SPOTIFY_CLIENT_ID;
+const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
+let spotifyToken = null, spotifyTokenExpiry = 0;
+
+async function getSpotifyToken() {
+  if (spotifyToken && Date.now() < spotifyTokenExpiry - 60000) return spotifyToken;
+  if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) return null;
+  const r = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Authorization": "Basic " + Buffer.from(SPOTIFY_CLIENT_ID + ":" + SPOTIFY_CLIENT_SECRET).toString("base64"),
+    },
+    body: "grant_type=client_credentials",
+  });
+  const d = await r.json();
+  if (!d.access_token) return null;
+  spotifyToken = d.access_token;
+  spotifyTokenExpiry = Date.now() + (d.expires_in || 3600) * 1000;
+  return spotifyToken;
+}
+
+app.get("/spotify-track/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id || !/^[A-Za-z0-9]{10,30}$/.test(id)) return res.status(400).json({ error: "Invalid track ID." });
+    const token = await getSpotifyToken();
+    if (!token) return res.status(503).json({ error: "Spotify lookup unavailable." });
+    const r = await fetch(`https://api.spotify.com/v1/tracks/${id}`, {
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+    if (!r.ok) return res.status(r.status).json({ error: "Track not found." });
+    const t = await r.json();
+    res.json({
+      id:          t.id,
+      title:       t.name,
+      artist:      t.artists?.map(a => a.name).join(", ") || "",
+      album:       t.album?.name || "",
+      releaseDate: t.album?.release_date || null,
+      popularity:  t.popularity || null,
+      spotifyUrl:  t.external_urls?.spotify || `https://open.spotify.com/track/${t.id}`,
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Scan ──────────────────────────────────────────────────────
 app.post("/scan", (req, res, next) => {
   upload.single("file")(req, res, (err) => {
