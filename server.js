@@ -326,15 +326,91 @@ function passwordResetEmailHtml(resetUrl) {
 }
 
 function welcomeEmailHtml(username) {
-  return baseEmail(`
-    <div style="font-size:18px;font-weight:700;margin-bottom:12px;">Welcome, ${username} 🎵</div>
-    <p style="font-size:14px;color:rgba(240,236,228,0.7);line-height:1.7;margin-bottom:20px;">Your free 3-day trial is active. Upload your beats and we'll scan them instantly.</p>
-    <div style="background:rgba(245,168,0,0.08);border:1px solid rgba(245,168,0,0.2);border-radius:12px;padding:16px 20px;margin-bottom:20px;">
-      <div style="font-size:13px;font-weight:600;color:#F5A800;margin-bottom:8px;">Your trial includes</div>
-      <div style="font-size:13px;color:rgba(240,236,228,0.7);line-height:1.8;">✓ 25 beat submissions<br/>✓ Locate undetected placements<br/>✓ Build your catalog</div>
+  return `<div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;background:#0e0f14;border-radius:20px;overflow:hidden;border:1px solid rgba(255,255,255,0.07);">
+
+    <!-- Header bar -->
+    <div style="height:4px;background:linear-gradient(90deg,#ffffff,#cccccc);"></div>
+
+    <!-- Logo + hero -->
+    <div style="padding:36px 36px 28px;border-bottom:1px solid rgba(255,255,255,0.07);">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:28px;">
+        <div style="font-size:20px;font-weight:800;color:#eeeae2;letter-spacing:-.3px;">TrackMy<span style="color:#ffffff;">Placements</span></div>
+      </div>
+      <div style="font-size:13px;font-weight:700;color:rgba(255,255,255,0.4);letter-spacing:.12em;text-transform:uppercase;margin-bottom:12px;">Welcome to the platform</div>
+      <div style="font-size:26px;font-weight:800;color:#eeeae2;line-height:1.25;margin-bottom:16px;letter-spacing:-.4px;">
+        Your beats are now being watched, @${username}.
+      </div>
+      <p style="font-size:15px;color:rgba(238,234,226,0.65);line-height:1.75;margin:0;">
+        As a producer, your work leaves fingerprints everywhere it goes — but without the right tools, placements disappear into the noise. TrackMyPlacements exists to change that.
+      </p>
     </div>
-    <a href="${APP_URL}" style="display:inline-block;background:#F5A800;color:#0e0e10;font-weight:700;font-size:14px;padding:12px 24px;border-radius:10px;text-decoration:none;">Start scanning ↗</a>
-  `);
+
+    <!-- What we do -->
+    <div style="padding:28px 36px;border-bottom:1px solid rgba(255,255,255,0.07);">
+      <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.12em;text-transform:uppercase;margin-bottom:18px;">How it works</div>
+
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div style="display:flex;gap:14px;align-items:flex-start;">
+          <div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">🪪</div>
+          <div>
+            <div style="font-size:14px;font-weight:700;color:#eeeae2;margin-bottom:3px;">Permanent fingerprint registration</div>
+            <div style="font-size:13px;color:rgba(238,234,226,0.55);line-height:1.65;">Every beat you upload gets assigned a unique digital ID — stored in our system forever. Your work is on record from the moment you submit it.</div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:14px;align-items:flex-start;">
+          <div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">🔍</div>
+          <div>
+            <div style="font-size:14px;font-weight:700;color:#eeeae2;margin-bottom:3px;">Instant scan on submission</div>
+            <div style="font-size:13px;color:rgba(238,234,226,0.55);line-height:1.65;">The moment you upload, we cross-reference your audio against Spotify, Apple Music, YouTube, TikTok, Deezer, and more using audio fingerprint matching — the same technology used by the industry.</div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:14px;align-items:flex-start;">
+          <div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">📡</div>
+          <div>
+            <div style="font-size:14px;font-weight:700;color:#eeeae2;margin-bottom:3px;">Daily monitoring — automatic alerts</div>
+            <div style="font-size:13px;color:rgba(238,234,226,0.55);line-height:1.65;">We rescan your library every day. If a new song containing your beat surfaces on any platform, we email you immediately — so you never find out late.</div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:14px;align-items:flex-start;">
+          <div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">✓</div>
+          <div>
+            <div style="font-size:14px;font-weight:700;color:#eeeae2;margin-bottom:3px;">Build your verified catalog</div>
+            <div style="font-size:13px;color:rgba(238,234,226,0.55);line-height:1.65;">Confirm matches and build a shareable, verified placement history — your proof of work for labels, managers, and licensing conversations.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Trial info -->
+    <div style="padding:24px 36px;border-bottom:1px solid rgba(255,255,255,0.07);background:rgba(255,255,255,0.02);">
+      <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px;">Your free trial</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <div style="padding:10px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;font-size:13px;color:#eeeae2;font-weight:600;">25 beat scans</div>
+        <div style="padding:10px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;font-size:13px;color:#eeeae2;font-weight:600;">Daily monitoring</div>
+        <div style="padding:10px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;font-size:13px;color:#eeeae2;font-weight:600;">Verified catalog</div>
+      </div>
+      <p style="margin:14px 0 0;font-size:12px;color:rgba(238,234,226,0.35);line-height:1.6;">Detection depends on how and when the song was released and indexed on each platform. Your fingerprint is registered immediately — anything that surfaces after submission will be caught.</p>
+    </div>
+
+    <!-- CTA -->
+    <div style="padding:28px 36px 32px;">
+      <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#0e0e10;font-weight:800;font-size:14px;padding:14px 28px;border-radius:12px;text-decoration:none;letter-spacing:.04em;">Scan your first beat ↗</a>
+      <p style="margin:20px 0 0;font-size:12px;color:rgba(238,234,226,0.3);line-height:1.6;">Questions? Reply to this email or reach us at <a href="mailto:support@trackmyplacements.com" style="color:rgba(238,234,226,0.5);">support@trackmyplacements.com</a></p>
+    </div>
+
+    <!-- Footer -->
+    <div style="padding:16px 36px;background:rgba(0,0,0,0.3);border-top:1px solid rgba(255,255,255,0.05);">
+      <div style="font-size:11px;color:rgba(238,234,226,0.2);line-height:1.7;">
+        <a href="${APP_URL}" style="color:rgba(238,234,226,0.3);text-decoration:none;font-weight:600;">trackmyplacements.com</a> · Placement Location Engine<br/>
+        You're receiving this because you just created an account.
+      </div>
+    </div>
+
+    <div style="height:3px;background:linear-gradient(90deg,#ffffff,#cccccc);"></div>
+  </div>`;
 }
 
 // ── Subscription status ───────────────────────────────────────
