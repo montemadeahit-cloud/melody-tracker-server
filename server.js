@@ -723,22 +723,52 @@ app.get("/spotify-track/:id", async (req, res) => {
   try {
     const id = req.params.id.split("?")[0].split("#")[0];
     if (!id || !/^[A-Za-z0-9]{10,30}$/.test(id)) return res.status(400).json({ error: "Invalid track ID." });
+
+    // Primary: Spotify Web API — richest data (artist, album, popularity).
     const token = await getSpotifyToken();
-    if (!token) return res.status(503).json({ error: "Spotify lookup unavailable." });
-    const r = await fetch(`https://api.spotify.com/v1/tracks/${id}`, {
-      headers: { "Authorization": `Bearer ${token}` },
-    });
-    if (!r.ok) return res.status(r.status).json({ error: "Track not found." });
-    const t = await r.json();
-    res.json({
-      id:          t.id,
-      title:       t.name,
-      artist:      t.artists?.map(a => a.name).join(", ") || "",
-      album:       t.album?.name || "",
-      releaseDate: t.album?.release_date || null,
-      popularity:  t.popularity || null,
-      spotifyUrl:  t.external_urls?.spotify || `https://open.spotify.com/track/${t.id}`,
-    });
+    if (token) {
+      try {
+        const r = await fetch(`https://api.spotify.com/v1/tracks/${id}`, {
+          headers: { "Authorization": `Bearer ${token}` },
+        });
+        if (r.ok) {
+          const t = await r.json();
+          return res.json({
+            id:          t.id,
+            title:       t.name,
+            artist:      t.artists?.map(a => a.name).join(", ") || "",
+            album:       t.album?.name || "",
+            releaseDate: t.album?.release_date || null,
+            popularity:  t.popularity || null,
+            spotifyUrl:  t.external_urls?.spotify || `https://open.spotify.com/track/${t.id}`,
+            source:      "api",
+          });
+        }
+        // Non-OK (e.g. token edge cases) — fall through to oEmbed.
+      } catch(apiErr) { console.error("Spotify API error, falling back to oEmbed:", apiErr.message); }
+    }
+
+    // Fallback: public oEmbed endpoint. Requires NO credentials, so link
+    // verification works even when SPOTIFY_CLIENT_ID/SECRET aren't set.
+    // Returns the track title + thumbnail (no artist/album fields).
+    const oembedUrl = "https://open.spotify.com/oembed?url=" + encodeURIComponent("https://open.spotify.com/track/" + id);
+    const oe = await fetch(oembedUrl);
+    if (oe.ok) {
+      const o = await oe.json();
+      return res.json({
+        id,
+        title:       o.title || "Spotify track",
+        artist:      "",
+        album:       "",
+        releaseDate: null,
+        popularity:  null,
+        spotifyUrl:  `https://open.spotify.com/track/${id}`,
+        thumbnail:   o.thumbnail_url || null,
+        source:      "oembed",
+      });
+    }
+
+    return res.status(404).json({ error: "Track not found." });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
