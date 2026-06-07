@@ -781,15 +781,146 @@ app.get("/spotify-track/:id", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Manual placement verification (user-submitted Spotify link) ──
+// ── Apple Music track lookup (iTunes Search API — no credentials needed) ──
+app.get("/apple-track", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "Missing url parameter." });
+
+    // Extract track ID from Apple Music URL
+    // Formats: music.apple.com/us/album/song-name/ALBUM_ID?i=TRACK_ID
+    //          music.apple.com/us/album/ALBUM_ID  (no track — reject)
+    const trackIdMatch = url.match(/[?&]i=(\d+)/);
+    const albumIdMatch = url.match(/\/album\/(?:[^/]+\/)?(\d+)/);
+
+    if (!trackIdMatch && !albumIdMatch) return res.status(400).json({ error: "Could not extract a track or album ID from this Apple Music link." });
+
+    const trackId = trackIdMatch ? trackIdMatch[1] : null;
+    const albumId = albumIdMatch ? albumIdMatch[1] : null;
+
+    // iTunes Lookup API — works for both track IDs and album IDs
+    const lookupId = trackId || albumId;
+    const entity   = trackId ? "song" : "album";
+    const lookupUrl = `https://itunes.apple.com/lookup?id=${lookupId}&entity=${entity}&limit=1`;
+
+    const r = await fetch(lookupUrl);
+    if (!r.ok) return res.status(404).json({ error: "Apple Music lookup failed." });
+    const data = await r.json();
+
+    // When looking up by album ID with entity=song, results[0] is the album, results[1]+ are tracks
+    // When looking up by track ID, results[0] is the track directly
+    const results = data.results || [];
+    const track = trackId
+      ? results.find(r => r.wrapperType === "track" || r.kind === "song") || results[0]
+      : results.find(r => r.wrapperType === "track" || r.kind === "song") || results[0];
+
+    if (!track || !track.trackName) return res.status(404).json({ error: "Track not found on Apple Music." });
+
+    return res.json({
+      id:          String(track.trackId || track.collectionId || lookupId),
+      title:       track.trackName || track.collectionName || "",
+      artist:      track.artistName || "",
+      album:       track.collectionName || "",
+      releaseDate: track.releaseDate ? track.releaseDate.slice(0, 10) : null,
+      trackUrl:    track.trackViewUrl || track.collectionViewUrl || url,
+      artwork:     track.artworkUrl100 || null,
+      source:      "itunes",
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── YouTube track lookup (oEmbed — no credentials needed) ──
+app.get("/youtube-track", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "Missing url parameter." });
+
+    // Extract video ID from various YouTube URL formats
+    const videoIdMatch = url.match(/(?:v=|\/embed\/|youtu\.be\/|\/shorts\/)([A-Za-z0-9_-]{11})/);
+    if (!videoIdMatch) return res.status(400).json({ error: "Could not extract a video ID from this YouTube link." });
+    const videoId = videoIdMatch[1];
+
+    // YouTube oEmbed — returns title and author (channel name), no auth needed
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent("https://www.youtube.com/watch?v=" + videoId)}&format=json`;
+    const r = await fetch(oembedUrl);
+    if (!r.ok) return res.status(404).json({ error: "Video not found or not embeddable." });
+    const data = await r.json();
+
+    // Parse "Song Name - Artist Name (Official Video)" style titles
+    // Attempts to extract a clean song title and artist from the YouTube title
+    let title  = data.title || "YouTube video";
+    let artist = data.author_name || "";
+
+    // Common pattern: "Artist - Song Title" or "Song Title - Artist"
+    const dashSplit = title.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+    if (dashSplit) {
+      // Heuristic: if author_name appears in part1, part2 is the song title
+      if (artist && dashSplit[1].toLowerCase().includes(artist.toLowerCase().split(" ")[0]?.toLowerCase())) {
+        title  = dashSplit[2].replace(/\s*[\(\[].*(official|video|audio|lyrics|music|hd|4k|vevo).*/gi, "").trim();
+        artist = dashSplit[1].trim();
+      } else {
+        title  = dashSplit[1].replace(/\s*[\(\[].*(official|video|audio|lyrics|music|hd|4k|vevo).*/gi, "").trim();
+        artist = dashSplit[2].trim();
+      }
+    }
+    // Strip trailing tags like "(Official Music Video)" from title
+    title = title.replace(/\s*[\(\[].*(official|video|audio|lyrics|music|hd|4k|vevo|feat|ft).*$/gi, "").trim();
+
+    return res.json({
+      id:       videoId,
+      title,
+      artist,
+      trackUrl: `https://www.youtube.com/watch?v=${videoId}`,
+      source:   "youtube_oembed",
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── SoundCloud track lookup (oEmbed — no credentials needed) ──
+app.get("/soundcloud-track", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "Missing url parameter." });
+
+    // Validate it looks like a SoundCloud track URL
+    if (!url.includes("soundcloud.com")) return res.status(400).json({ error: "Please paste a SoundCloud track link." });
+
+    // SoundCloud oEmbed — free, returns title and author_name
+    const oembedUrl = `https://soundcloud.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    const r = await fetch(oembedUrl);
+    if (!r.ok) return res.status(404).json({ error: "Track not found on SoundCloud." });
+    const data = await r.json();
+
+    // SoundCloud oEmbed title is typically "Song Title by Artist Name"
+    let title  = data.title || "SoundCloud track";
+    let artist = data.author_name || "";
+
+    // Strip the " by Artist" suffix that SoundCloud appends to oEmbed titles
+    const bySuffix = title.match(/^(.+?)\s+by\s+(.+)$/i);
+    if (bySuffix) {
+      title  = bySuffix[1].trim();
+      artist = bySuffix[2].trim() || artist;
+    }
+
+    return res.json({
+      id:       encodeURIComponent(url),
+      title,
+      artist,
+      trackUrl: url,
+      source:   "soundcloud_oembed",
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Manual placement verification (user-submitted platform link) ──
 // When a scan finds NO match but the producer knows where the beat is
-// placed, they paste the Spotify link in the UI. The frontend verifies
-// it via /spotify-track, then calls this to PERSIST it onto the beat
-// record — flipping status to "placed" and storing the DSP data so it
-// becomes a real, durable placement (visible in Library, survives reload).
+// placed, they paste a platform link in the UI. The frontend verifies
+// it via the appropriate lookup endpoint, then calls this to PERSIST it
+// onto the beat record — flipping status to "placed" and storing the DSP
+// data so it becomes a real, durable placement (visible in Library, survives reload).
 app.post("/verify-placement", async (req, res) => {
   try {
-    const { user_id, fingerprint_id, beat_id, spotify_id, title, artist } = req.body;
+    const { user_id, fingerprint_id, beat_id, spotify_id, youtube_id, platform, track_url, title, artist } = req.body;
     if (!user_id || (!fingerprint_id && !beat_id)) return res.status(400).json({ error: "Missing user_id and a beat reference (fingerprint_id or beat_id)." });
     if (!title) return res.status(400).json({ error: "Missing track title." });
 
@@ -803,15 +934,21 @@ app.post("/verify-placement", async (req, res) => {
     if (!Array.isArray(beats) || beats.length === 0) return res.status(404).json({ error: "Beat not found for this user." });
     const beat = beats[0];
 
-    // Only writes columns we know exist (same ones the /scan insert uses)
-    const updated = await sbUpdate("beats", `id=eq.${beat.id}`, {
+    // Build update payload — store whichever DSP ID we have
+    const updatePayload = {
       status:       "placed",
       last_result:  title,
       last_artist:  artist || null,
-      spotify_id:   spotify_id || null,
       last_scanned: new Date().toISOString(),
-    });
-    console.log("Manual placement verified:", beat.id, "→", title, spotify_id || "(no spotify id)");
+    };
+    if (spotify_id)  updatePayload.spotify_id  = spotify_id;
+    if (youtube_id)  updatePayload.youtube_id  = youtube_id;
+    // For Apple Music / SoundCloud, store the direct URL in a note field if the column exists
+    // (gracefully ignored by Supabase if column doesn't exist)
+    if (track_url && !spotify_id && !youtube_id) updatePayload.track_url = track_url;
+
+    const updated = await sbUpdate("beats", `id=eq.${beat.id}`, updatePayload);
+    console.log("Manual placement verified:", beat.id, "→", title, platform || "spotify", spotify_id || youtube_id || track_url || "(no id)");
     res.json({ success: true, beat: Array.isArray(updated) ? updated[0] : (updated || { id: beat.id }) });
   } catch (e) { console.error("verify-placement error:", e.message); res.status(500).json({ error: e.message }); }
 });
