@@ -550,6 +550,15 @@ app.post("/auth/signup", async (req, res) => {
     // Send branded welcome email (non-blocking)
     if (RESEND_KEY) {
       sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(username)).catch(console.error);
+      // Notify admin of new signup
+      sendEmail("trackmyplacements@gmail.com", `New signup: @${username}`, baseEmail(`
+        <div style="margin-top:24px;">
+          <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.45);letter-spacing:.14em;text-transform:uppercase;margin-bottom:12px;">New user signed up</div>
+          <div style="font-size:18px;font-weight:800;color:#ffffff;margin-bottom:8px;">@${username}</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:4px;">${email}</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.35);margin-top:8px;">IP: ${ip} &nbsp;·&nbsp; ${new Date().toUTCString()}</div>
+        </div>
+      `)).catch(console.error);
     }
 
     if (accessToken) return res.json({ access_token:accessToken, user:{ id:userId, email:authData.user?.email||email, username } });
