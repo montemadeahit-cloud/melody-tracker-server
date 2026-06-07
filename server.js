@@ -678,7 +678,7 @@ app.post("/support", async (req, res) => {
     // Set reply_to so you can reply directly to the user from your inbox.
     const payload = {
       from:    FROM_EMAIL,
-      to:      [FROM_EMAIL],
+      to:      [FROM_EMAIL, "trackmyplacements@gmail.com"],
       subject,
       html,
       ...(replyEmail ? { reply_to: replyEmail } : {}),
