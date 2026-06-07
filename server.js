@@ -895,12 +895,23 @@ app.post("/scan", (req, res, next) => {
 
     if (user_id && SUPABASE_URL) {
       try {
-        // Quality filter — only block truly garbage results, allow missing artist
+        // Quality filter — must match the frontend's "confident" threshold exactly:
+        // score >= 99 AND a confirmed DSP ID (Spotify, YouTube, or Deezer).
+        // Anything below this is a "possible" match on the frontend and must NOT
+        // write "placed" to the DB — the user has to verify it manually first.
         const BAD_TITLES = ["unknown","untitled","","no title","n/a","na","null","undefined"];
+        function hasDspId(m) {
+          return !!(
+            m.external_metadata?.spotify?.track?.id ||
+            m.external_metadata?.youtube?.vid ||
+            m.external_metadata?.deezer?.track?.id
+          );
+        }
         function isGoodMatch(m) {
           if (!m) return false;
           const score = m.score || 100;
-          if (score < 80) return false;
+          if (score < 99) return false;          // must be high-confidence
+          if (!hasDspId(m)) return false;        // must have a verifiable DSP link
           const title = (m.title || "").toLowerCase().trim();
           if (BAD_TITLES.includes(title)) return false;
           if (title.includes("untitled")) return false;
@@ -1293,9 +1304,19 @@ app.post("/rescan", async (req, res) => {
         const acrData=await scanAllEngines(buffer, beat.filename, "audio/mpeg");
         const rawMatched = acrData?.status?.code===0;
         const scanMusic  = acrData?.metadata?.music || [];
+        // Same confident threshold as frontend and scan endpoint:
+        // score >= 99 AND a confirmed DSP ID required to write "placed".
+        function hasDspIdRescan(m) {
+          return !!(
+            m.external_metadata?.spotify?.track?.id ||
+            m.external_metadata?.youtube?.vid ||
+            m.external_metadata?.deezer?.track?.id
+          );
+        }
         function isGoodRescanMatch(m) {
           if (!m) return false;
-          if ((m.score||100) < 80) return false;
+          if ((m.score||100) < 99) return false;   // high-confidence only
+          if (!hasDspIdRescan(m)) return false;     // must have a verifiable DSP link
           const t = (m.title||"").toLowerCase().trim();
           const badT = ["unknown","untitled","","no title","n/a","na","null","undefined"];
           if (badT.includes(t)||t.includes("untitled")) return false;
