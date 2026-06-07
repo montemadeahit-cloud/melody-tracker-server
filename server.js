@@ -42,6 +42,11 @@ const LIMITS = {
 };
 function getLimits(tier) { return LIMITS[tier] || LIMITS.trial; }
 
+// ── Comped accounts ───────────────────────────────────────────
+// Usernames in this set are always granted full Tier 2 access,
+// regardless of trial/Stripe state. Matched case-insensitively.
+const COMP_TIER2 = new Set(["montemadethis"]);
+
 // ── IP helpers ────────────────────────────────────────────────
 function getIP(req) {
   return req.headers["x-forwarded-for"]?.split(",")[0].trim()
@@ -434,6 +439,18 @@ async function getSubscriptionStatus(user_id) {
   const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
   const profile  = profiles?.[0];
   if (!profile) return { hasAccess:false, trialActive:false, subscriptionActive:false, daysLeft:0, submissionsUsed:0, submissionLimit:25, emailMonitorsUsed:0, emailMonitorLimit:0 };
+
+  // Comped accounts — always full Tier 2, never gated by trial/billing.
+  if (profile.username && COMP_TIER2.has(profile.username.toLowerCase())) {
+    const compLimits = getLimits("tier2");
+    return {
+      hasAccess: true, trialActive: false, subscriptionActive: true, pastDue: false,
+      daysLeft: 9999, trialEnd: new Date(Date.now() + 9999*24*60*60*1000).toISOString(),
+      tier: "tier2", tierLabel: compLimits.label,
+      submissionsUsed: profile.submissions_used || 0, submissionLimit: compLimits.submissions,
+      emailMonitorsUsed: profile.email_monitors_used || 0, emailMonitorLimit: compLimits.emailMonitors,
+    };
+  }
 
   const trialStart = profile.trial_start ? new Date(profile.trial_start) : new Date();
   const trialEnd   = new Date(trialStart.getTime() + 3*24*60*60*1000);
