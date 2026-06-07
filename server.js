@@ -728,6 +728,49 @@ async function getSpotifyToken() {
   return spotifyToken;
 }
 
+// Best-effort artist extraction from a Spotify track page's HTML.
+// Tries several markup strategies in order of reliability and returns the
+// first that yields something sane. Returns "" if nothing usable is found.
+function extractSpotifyArtist(html) {
+  if (!html) return "";
+  const clean = (s) => (s || "")
+    .replace(/&amp;/g, "&").replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&").trim();
+
+  // 1) JSON-LD byArtist — most structured when present.
+  try {
+    const ld = html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+    if (ld) {
+      const data = JSON.parse(ld[1]);
+      const arr = Array.isArray(data) ? data : [data];
+      for (const node of arr) {
+        const by = node?.byArtist;
+        if (by) {
+          const names = (Array.isArray(by) ? by : [by]).map((a) => a?.name).filter(Boolean);
+          if (names.length) return clean(names.join(", "));
+        }
+      }
+    }
+  } catch (e) { /* fall through */ }
+
+  // 2) music:musician meta tags (one per artist).
+  const musicians = [...html.matchAll(/<meta[^>]+property=["']music:musician["'][^>]+content=["']([^"']+)["']/gi)]
+    .map((m) => clean(m[1])).filter(Boolean);
+  if (musicians.length) return musicians.join(", ");
+
+  // 3) og:description — historically "Artist · Song · year". Take the part
+  //    before the first separator, guarding against generic boilerplate.
+  const ogDesc = html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
+  if (ogDesc) {
+    const first = clean(ogDesc[1]).split(/\s*[·•|]\s*/)[0];
+    const lower = first.toLowerCase();
+    if (first && !lower.startsWith("listen to") && !lower.startsWith("song ") && lower !== "song" && lower !== "spotify") {
+      return first;
+    }
+  }
+  return "";
+}
+
 app.get("/spotify-track/:id", async (req, res) => {
   try {
     const id = req.params.id.split("?")[0].split("#")[0];
@@ -757,23 +800,43 @@ app.get("/spotify-track/:id", async (req, res) => {
       } catch(apiErr) { console.error("Spotify API error, falling back to oEmbed:", apiErr.message); }
     }
 
-    // Fallback: public oEmbed endpoint. Requires NO credentials, so link
-    // verification works even when SPOTIFY_CLIENT_ID/SECRET aren't set.
-    // Returns the track title + thumbnail (no artist/album fields).
+    // Fallback: public endpoints, NO credentials required, so link
+    // verification still works when SPOTIFY_CLIENT_ID/SECRET aren't set.
+    // oEmbed gives us the title + thumbnail; the public track page's
+    // Open Graph / JSON-LD tags let us best-effort recover the artist.
+    // NOTE: this is best-effort — Spotify can change their page markup at
+    // any time. Setting SPOTIFY_CLIENT_ID/SECRET is the reliable path and
+    // always wins above. If you're seeing blank artists, set those vars.
     const oembedUrl = "https://open.spotify.com/oembed?url=" + encodeURIComponent("https://open.spotify.com/track/" + id);
     const oe = await fetch(oembedUrl);
     if (oe.ok) {
       const o = await oe.json();
+      let title  = o.title || "Spotify track";
+      let artist = "";
+
+      // Best-effort: pull the artist from the public track page metadata.
+      try {
+        const pageRes = await fetch(`https://open.spotify.com/track/${id}`, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; TrackMyPlacements/1.0)" },
+        });
+        if (pageRes.ok) {
+          const html = await pageRes.text();
+          artist = extractSpotifyArtist(html) || "";
+        }
+      } catch (scrapeErr) {
+        console.error("Spotify artist scrape failed (non-fatal):", scrapeErr.message);
+      }
+
       return res.json({
         id,
-        title:       o.title || "Spotify track",
-        artist:      "",
+        title,
+        artist,
         album:       "",
         releaseDate: null,
         popularity:  null,
         spotifyUrl:  `https://open.spotify.com/track/${id}`,
         thumbnail:   o.thumbnail_url || null,
-        source:      "oembed",
+        source:      artist ? "oembed+scrape" : "oembed",
       });
     }
 
@@ -787,42 +850,27 @@ app.get("/apple-track", async (req, res) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "Missing url parameter." });
 
-    // Extract track ID from Apple Music URL
-    // Formats: music.apple.com/us/album/song-name/ALBUM_ID?i=TRACK_ID
-    //          music.apple.com/us/album/ALBUM_ID  (no track — reject)
+    // Require a specific track — Apple Music track URLs always have ?i=TRACK_ID
     const trackIdMatch = url.match(/[?&]i=(\d+)/);
-    const albumIdMatch = url.match(/\/album\/(?:[^/]+\/)?(\d+)/);
+    if (!trackIdMatch) {
+      return res.status(400).json({ error: "Please paste a link to a specific song, not an album. In Apple Music, tap the three dots on the song → Share → Copy Link." });
+    }
+    const trackId = trackIdMatch[1];
 
-    if (!trackIdMatch && !albumIdMatch) return res.status(400).json({ error: "Could not extract a track or album ID from this Apple Music link." });
-
-    const trackId = trackIdMatch ? trackIdMatch[1] : null;
-    const albumId = albumIdMatch ? albumIdMatch[1] : null;
-
-    // iTunes Lookup API — works for both track IDs and album IDs
-    const lookupId = trackId || albumId;
-    const entity   = trackId ? "song" : "album";
-    const lookupUrl = `https://itunes.apple.com/lookup?id=${lookupId}&entity=${entity}&limit=1`;
-
-    const r = await fetch(lookupUrl);
+    const r = await fetch(`https://itunes.apple.com/lookup?id=${trackId}&entity=song&limit=1`);
     if (!r.ok) return res.status(404).json({ error: "Apple Music lookup failed." });
     const data = await r.json();
-
-    // When looking up by album ID with entity=song, results[0] is the album, results[1]+ are tracks
-    // When looking up by track ID, results[0] is the track directly
-    const results = data.results || [];
-    const track = trackId
-      ? results.find(r => r.wrapperType === "track" || r.kind === "song") || results[0]
-      : results.find(r => r.wrapperType === "track" || r.kind === "song") || results[0];
+    const track = (data.results || []).find(x => x.wrapperType === "track" || x.kind === "song");
 
     if (!track || !track.trackName) return res.status(404).json({ error: "Track not found on Apple Music." });
 
     return res.json({
-      id:          String(track.trackId || track.collectionId || lookupId),
-      title:       track.trackName || track.collectionName || "",
+      id:          String(track.trackId),
+      title:       track.trackName,
       artist:      track.artistName || "",
       album:       track.collectionName || "",
       releaseDate: track.releaseDate ? track.releaseDate.slice(0, 10) : null,
-      trackUrl:    track.trackViewUrl || track.collectionViewUrl || url,
+      trackUrl:    track.trackViewUrl || url,
       artwork:     track.artworkUrl100 || null,
       source:      "itunes",
     });
@@ -1074,11 +1122,16 @@ app.post("/scan", (req, res, next) => {
         const storagePath = `${user_id}/${req.file.originalname}`;
 
         await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
+        // NOTE: we do NOT auto-mark a scan match as "placed" anymore. Even a
+        // high-confidence hit is only a *candidate* until the producer confirms
+        // it in the UI (which calls /verify-placement and flips it to "placed").
+        // We still remember the detected candidate so it survives reload and so
+        // the rescan job doesn't re-flag the same match.
         await sbInsert("beats", {
           user_id,
           filename:       req.file.originalname,
           storage_path:   storagePath,
-          status:         matched ? "placed" : "monitoring",
+          status:         "monitoring",
           last_scanned:   new Date().toISOString(),
           last_result:    title,
           last_artist:    artist || null,
@@ -1109,19 +1162,10 @@ app.post("/scan", (req, res, next) => {
         const profile   = profiles?.[0];
         if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used:(profile.submissions_used||0)+1 });
 
-        // Email if tier allows
-        if (matched && RESEND_KEY && profile) {
-          const st = await getSubscriptionStatus(user_id);
-          const canEmail = st.emailMonitorLimit===null || (st.emailMonitorLimit>0 && st.emailMonitorsUsed<st.emailMonitorLimit);
-          if (canEmail) {
-            const uRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${user_id}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
-            const uData = await uRes.json();
-            if (uData?.email) {
-              await sendEmail(uData.email, `🎵 Placement found: "${req.file.originalname}"`, placementEmailHtml(req.file.originalname, title, artist, spotifyId, youtubeId));
-              if (st.emailMonitorLimit!==null) await sbUpdate("profiles", `id=eq.${user_id}`, { email_monitors_used:(profile.email_monitors_used||0)+1 });
-            }
-          }
-        }
+        // No "Placement found" email here on purpose. The producer is looking
+        // at the results right now and confirms the placement themselves via
+        // the verify step. The confirmation email (if any) belongs to the
+        // background rescan path, where there's no human in the loop.
       } catch(dbErr) { console.error("Post-scan error (non-fatal):",dbErr.message); }
     }
 
