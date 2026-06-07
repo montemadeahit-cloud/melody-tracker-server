@@ -351,86 +351,144 @@ async function sendEmail(to, subject, html) {
 }
 
 function baseEmail(content) {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
-  <body style="margin:0;padding:0;background:#0e0e14;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0e0e14;padding:40px 16px;">
-    <tr><td align="center">
-      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:linear-gradient(180deg,#1a1a24 0%,#13131c 100%);border:1px solid #2e2e40;border-top:1px solid #42425a;border-radius:20px;overflow:hidden;">
-        <tr><td style="height:3px;background:linear-gradient(90deg,#ffffff,#dddddd);font-size:0;">&nbsp;</td></tr>
-        <tr><td style="padding:32px 36px 0;">
-          <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:16px;font-weight:700;color:#f0ece4;letter-spacing:-.2px;">TrackMy<span style="color:#ffffff;">Placements</span></div>
-        </td></tr>
-        <tr><td style="padding:0 36px 32px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
-          ${content}
-        </td></tr>
-        <tr><td style="padding:20px 36px;border-top:1px solid rgba(255,255,255,0.1);">
-          <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:11px;color:rgba(255,255,255,0.35);line-height:1.7;">
-            <a href="${APP_URL}" style="color:rgba(255,255,255,0.5);text-decoration:none;font-weight:600;">trackmyplacements.com</a> &nbsp;·&nbsp; Placement Location Engine
-          </div>
-        </td></tr>
-        <tr><td style="height:3px;background:linear-gradient(90deg,#ffffff,#dddddd);font-size:0;">&nbsp;</td></tr>
-      </table>
-    </td></tr>
-  </table>
-  </body></html>`;
+  // Waveform bars as inline SVG (matches the app logo exactly)
+  const logoSvg = `<svg width="20" height="20" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:inline-block;vertical-align:middle;margin-right:8px;"><rect x="0" y="25" width="8" height="31" rx="4" fill="#FFFFFF"/><rect x="11" y="17" width="8" height="39" rx="4" fill="#FFFFFF"/><rect x="22" y="7" width="8" height="49" rx="4" fill="#FFFFFF"/><rect x="33" y="14" width="8" height="42" rx="4" fill="#eeeae2"/><rect x="44" y="24" width="8" height="32" rx="4" fill="#eeeae2"/></svg>`;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>TrackMyPlacements</title>
+</head>
+<body style="margin:0;padding:0;background:#090910;-webkit-text-size-adjust:100%;">
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#090910;padding:32px 16px 48px;">
+  <tr><td align="center">
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:520px;">
+
+      <!-- Top accent line -->
+      <tr><td style="height:2px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,#ffffff 40%,#ffffff 60%,rgba(255,255,255,0) 100%);border-radius:1px;font-size:0;">&nbsp;</td></tr>
+
+      <!-- Card -->
+      <tr><td style="background:linear-gradient(180deg,#17171f 0%,#111118 100%);border:1px solid rgba(255,255,255,0.1);border-top:1px solid rgba(255,255,255,0.2);border-radius:18px;overflow:hidden;">
+
+        <!-- Header -->
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+          <tr>
+            <td style="padding:28px 32px 24px;border-bottom:1px solid rgba(255,255,255,0.07);">
+              <table cellpadding="0" cellspacing="0" role="presentation">
+                <tr>
+                  <td style="vertical-align:middle;padding-right:8px;">${logoSvg}</td>
+                  <td style="vertical-align:middle;">
+                    <span style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:15px;font-weight:700;color:#eeeae2;letter-spacing:-.2px;">TrackMy<span style="color:#ffffff;">Placements</span></span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Content -->
+          <tr>
+            <td style="padding:28px 32px 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;">
+              ${content}
+            </td>
+          </tr>
+        </table>
+
+      </td></tr>
+
+      <!-- Footer -->
+      <tr><td style="padding:20px 4px 0;">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+          <tr>
+            <td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:11px;color:rgba(255,255,255,0.3);line-height:1.7;">
+              <a href="${APP_URL}" style="color:rgba(255,255,255,0.45);text-decoration:none;font-weight:600;letter-spacing:.01em;">trackmyplacements.com</a>
+              <span style="color:rgba(255,255,255,0.18);margin:0 8px;">·</span>
+              <span style="color:rgba(255,255,255,0.25);">Placement Location Engine</span>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+
+    </table>
+  </td></tr>
+</table>
+</body></html>`;
 }
 
 function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
   const link = spotifyId ? `https://open.spotify.com/track/${spotifyId}` : youtubeId ? `https://youtube.com/watch?v=${youtubeId}` : null;
+  const platformLabel = spotifyId ? "Listen on Spotify" : youtubeId ? "Watch on YouTube" : null;
+  const platformBg = spotifyId ? "#1DB954" : youtubeId ? "#FF0000" : "#ffffff";
+  const platformColor = spotifyId || youtubeId ? "#ffffff" : "#050508";
   return baseEmail(`
-    <div style="margin-top:28px;padding:22px 24px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.18);border-top:1px solid rgba(255,255,255,0.26);border-radius:14px;margin-bottom:24px;">
-      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.55);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Placement detected</div>
-      <div style="font-size:22px;font-weight:800;color:#ffffff;letter-spacing:-.3px;margin-bottom:4px;">${title}</div>
-      <div style="font-size:14px;color:rgba(255,255,255,0.6);margin-bottom:0;">${artist || "Unknown artist"}</div>
+    <!-- Label -->
+    <div style="display:inline-block;padding:4px 12px;background:rgba(78,196,122,0.12);border:1px solid rgba(78,196,122,0.28);border-radius:999px;margin-bottom:18px;">
+      <span style="font-size:11px;font-weight:600;color:#4ec47a;letter-spacing:.04em;">● Placement found</span>
     </div>
-    <div style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;">Your beat</div>
-    <div style="font-size:14px;font-weight:600;color:#f0ece4;margin-bottom:28px;">${filename}</div>
-    ${link ? `<a href="${link}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 24px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Listen to the track ↗</a>` : ""}
-    <p style="margin:24px 0 0;font-size:12px;color:rgba(255,255,255,0.4);line-height:1.7;">Head to your TrackMyPlacements dashboard to verify this placement and add it to your catalog.</p>
+
+    <!-- Track info card -->
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-top:1px solid rgba(255,255,255,0.18);border-radius:14px;margin-bottom:24px;">
+      <tr><td style="padding:20px 22px;">
+        <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.4);letter-spacing:.13em;text-transform:uppercase;margin-bottom:10px;">Recognized as</div>
+        <div style="font-size:22px;font-weight:800;color:#ffffff;letter-spacing:-.4px;line-height:1.2;margin-bottom:5px;">${title}</div>
+        <div style="font-size:13px;color:rgba(238,234,226,0.5);">${artist || "Unknown artist"}</div>
+      </td></tr>
+    </table>
+
+    <!-- Your beat label -->
+    <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.13em;margin-bottom:6px;">Your beat</div>
+    <div style="font-size:14px;font-weight:600;color:#eeeae2;margin-bottom:26px;line-height:1.4;">${filename}</div>
+
+    <!-- CTA button -->
+    ${link ? `<a href="${link}" style="display:inline-block;background:${platformBg};color:${platformColor};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-weight:700;font-size:13px;padding:12px 22px;border-radius:10px;text-decoration:none;letter-spacing:.03em;">${platformLabel} ↗</a>` : ""}
+
+    <!-- Dashboard CTA -->
+    <p style="margin:22px 0 0;font-size:12px;color:rgba(255,255,255,0.38);line-height:1.75;">Head to your dashboard to verify this placement and add it to your catalog.</p>
   `);
 }
 
 function passwordResetEmailHtml(resetUrl) {
   return baseEmail(`
-    <div style="margin-top:28px;margin-bottom:8px;">
-      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.45);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px;">Account</div>
-      <div style="font-size:22px;font-weight:800;color:#ffffff;letter-spacing:-.3px;margin-bottom:12px;">Reset your password</div>
-      <p style="font-size:14px;color:rgba(255,255,255,0.6);line-height:1.75;margin:0 0 28px;">Click the button below to set a new password. This link expires in <span style="color:#ffffff;font-weight:600;">1 hour</span>.</p>
-      <a href="${resetUrl}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 24px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Reset my password ↗</a>
-      <p style="margin:20px 0 0;font-size:12px;color:rgba(255,255,255,0.35);line-height:1.6;">Didn't request this? You can safely ignore this email.</p>
-    </div>
+    <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.13em;text-transform:uppercase;margin-bottom:14px;">Account security</div>
+    <div style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-.4px;margin-bottom:14px;line-height:1.2;">Reset your password</div>
+    <p style="font-size:14px;color:rgba(238,234,226,0.55);line-height:1.8;margin:0 0 26px;">Click the button below to set a new password. This link expires in <span style="color:#ffffff;font-weight:600;">1 hour</span>.</p>
+    <a href="${resetUrl}" style="display:inline-block;background:#ffffff;color:#050508;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-weight:700;font-size:13px;padding:12px 22px;border-radius:10px;text-decoration:none;letter-spacing:.03em;">Set new password ↗</a>
+    <p style="margin:22px 0 0;font-size:12px;color:rgba(255,255,255,0.3);line-height:1.6;">Didn't request this? You can safely ignore this email — your account is unchanged.</p>
   `);
 }
 
 function welcomeEmailHtml(username) {
+  const features = [
+    ["🪪", "Fingerprint registered", "A permanent, content-based ID assigned the moment you upload. It lives in our system forever."],
+    ["🔍", "Instant scan", "Your beat is checked immediately across Spotify, Apple Music, YouTube, TikTok & more."],
+    ["📡", "Daily rescan", "We run your full library every day. You'll get an email the moment something surfaces."],
+    ["✓",  "Verified catalog", "Confirmed placements are logged and shareable — your track record, backed by data."],
+  ];
   return baseEmail(`
-    <div style="margin-top:28px;">
-      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.45);letter-spacing:.14em;text-transform:uppercase;margin-bottom:12px;">Welcome</div>
-      <div style="font-size:26px;font-weight:800;color:#ffffff;letter-spacing:-.4px;line-height:1.2;margin-bottom:16px;">You're in, @${username}.</div>
-      <p style="font-size:14px;color:rgba(255,255,255,0.6);line-height:1.8;margin:0 0 28px;">Right now your beats have no identifier on the internet — that's why placements are hard to track. Upload one and we assign it a unique ID, scan it immediately across all major platforms, and email you the moment it surfaces anywhere.</p>
+    <!-- Greeting -->
+    <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.13em;text-transform:uppercase;margin-bottom:14px;">Welcome</div>
+    <div style="font-size:28px;font-weight:800;color:#ffffff;letter-spacing:-.5px;line-height:1.15;margin-bottom:16px;">You're in,<br/>@${username}.</div>
+    <p style="font-size:14px;color:rgba(238,234,226,0.5);line-height:1.85;margin:0 0 28px;">Right now your beats have no identifier on the internet — that's why placements are hard to track. Upload one and we assign it a unique ID, scan it immediately across all major platforms, and email you the moment it surfaces anywhere.</p>
 
-      <div style="height:1px;background:rgba(255,255,255,0.12);margin-bottom:24px;"></div>
+    <!-- Divider -->
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:24px;">
+      <tr><td style="height:1px;background:rgba(255,255,255,0.1);font-size:0;">&nbsp;</td></tr>
+    </table>
 
-      <table width="100%" cellpadding="0" cellspacing="0">
-        ${[
-          ["🪪","Fingerprint","Assigned the moment you upload. Stored permanently."],
-          ["🔍","Instant scan","Checked across Spotify, Apple Music, YouTube, TikTok & more."],
-          ["📡","Daily rescan","We run your library every day and email you when something matches."],
-          ["✓","Verified catalog","Confirmed placements logged and shareable."],
-        ].map(([icon, label, body]) => `
-        <tr>
-          <td style="padding:10px 0;vertical-align:top;width:28px;font-size:15px;">${icon}</td>
-          <td style="padding:10px 0 10px 12px;vertical-align:top;border-bottom:1px solid rgba(255,255,255,0.1);">
-            <div style="font-size:13px;font-weight:700;color:#ffffff;margin-bottom:2px;">${label}</div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.5);line-height:1.6;">${body}</div>
-          </td>
-        </tr>`).join("")}
-      </table>
+    <!-- Features -->
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:28px;">
+      ${features.map(([icon, label, body], i) => `
+      <tr>
+        <td style="width:32px;vertical-align:top;padding:0 0 18px;font-size:16px;color:#ffffff;">${icon}</td>
+        <td style="vertical-align:top;padding:0 0 18px 12px;${i < features.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.07);padding-bottom:18px;' : ''}">
+          <div style="font-size:13px;font-weight:700;color:#ffffff;margin-bottom:3px;">${label}</div>
+          <div style="font-size:12px;color:rgba(238,234,226,0.45);line-height:1.65;">${body}</div>
+        </td>
+      </tr>`).join("")}
+    </table>
 
-      <div style="margin-top:28px;">
-        <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#050508;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:800;font-size:13px;padding:13px 28px;border-radius:10px;text-decoration:none;letter-spacing:.06em;text-transform:uppercase;">Scan your first beat ↗</a>
-      </div>
-    </div>
+    <!-- CTA -->
+    <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#050508;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-weight:700;font-size:13px;padding:13px 26px;border-radius:10px;text-decoration:none;letter-spacing:.03em;">Scan your first beat ↗</a>
   `);
 }
 
@@ -569,12 +627,12 @@ app.post("/auth/signup", async (req, res) => {
       sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(username)).catch(console.error);
       // Notify admin of new signup
       sendEmail("trackmyplacements@gmail.com", `New signup: @${username}`, baseEmail(`
-        <div style="margin-top:24px;">
-          <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.45);letter-spacing:.14em;text-transform:uppercase;margin-bottom:12px;">New user signed up</div>
-          <div style="font-size:18px;font-weight:800;color:#ffffff;margin-bottom:8px;">@${username}</div>
-          <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:4px;">${email}</div>
-          <div style="font-size:12px;color:rgba(255,255,255,0.35);margin-top:8px;">IP: ${ip} &nbsp;·&nbsp; ${new Date().toUTCString()}</div>
+        <div style="display:inline-block;padding:4px 12px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);border-radius:999px;margin-bottom:16px;">
+          <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.6);letter-spacing:.04em;">New user signed up</span>
         </div>
+        <div style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-.4px;margin-bottom:8px;">@${username}</div>
+        <div style="font-size:13px;color:rgba(238,234,226,0.5);margin-bottom:4px;">${email}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.28);margin-top:10px;font-family:monospace;">IP: ${ip} &nbsp;·&nbsp; ${new Date().toUTCString()}</div>
       `)).catch(console.error);
     }
 
