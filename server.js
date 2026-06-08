@@ -1174,115 +1174,57 @@ app.post("/scan", (req, res, next) => {
     if (!req.file) return res.status(400).json({ error:"No file uploaded." });
     const { user_id } = req.body;
 
-    if (user_id && SUPABASE_URL) {
-      const status = await getSubscriptionStatus(user_id);
-      if (!status.hasAccess) return res.status(403).json({ error: status.pastDue ? "Your payment is past due. Please update billing to continue scanning." : "Your free trial has ended. Subscribe to continue scanning." });
-      if (status.submissionLimit!==null && status.submissionsUsed>=status.submissionLimit) return res.status(403).json({ error:`Submission limit reached (${status.submissionsUsed}/${status.submissionLimit}). Upgrade to scan more beats.` });
-
-      // Daily upload cap — protects against bulk abuse on unlimited plans
-      // 50 beats/day is well above any real producer's daily workflow
-      const DAILY_CAP = 50;
-      const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-      const todayBeats = await sbSelect("beats", `user_id=eq.${user_id}&created_at=gte.${todayStart.toISOString()}`);
-      if (Array.isArray(todayBeats) && todayBeats.length >= DAILY_CAP) {
-        return res.status(429).json({ error:`Daily limit of ${DAILY_CAP} uploads reached. Come back tomorrow.` });
-      }
-
-      // ── Re-test: if this beat was already submitted, return the existing record instead of erroring ──
-      // This lets the algorithm learn — the verified placement comes back in scan results,
-      // and the beat stays in the monitoring queue for daily rescans.
-      const existing = await sbSelect("beats", `user_id=eq.${user_id}&filename=eq.${encodeURIComponent(req.file.originalname)}`);
-      if (Array.isArray(existing) && existing.length > 0) {
-        const beat = existing[0];
-        // Always re-hash and re-fingerprint (file contents may have changed)
-        const reHash = computeAudioHash(req.file.buffer);
-
-        // Run a fresh scan so the results stay current and the algorithm sees new data
-        const freshAcrData = await scanAllEngines(req.file.buffer, req.file.originalname, req.file.mimetype);
-
-        // Bump last_scanned so daily rescan deprioritises this one for a while
-        await sbUpdate("beats", `id=eq.${beat.id}`, { last_scanned: new Date().toISOString() });
-
-        // If the beat has a user-verified placement, inject it into the music array
-        // so the frontend surfaces it even if the live scan missed it this time.
-        const retestData = JSON.parse(JSON.stringify(freshAcrData || { status:{ code:1001, msg:"No result" }, metadata:{ music:[], humming:[] } }));
-        if (beat.status === "placed" && beat.last_result) {
-          const injected = {
-            title:    beat.last_result,
-            artists:  beat.last_artist ? [{ name: beat.last_artist }] : [],
-            score:    100,   // treated as verified — always surfaces as confident
-            release_date: null,
-            external_metadata: {
-              ...(beat.spotify_id ? { spotify: { track: { id: beat.spotify_id } } } : {}),
-              ...(beat.youtube_id ? { youtube: { vid: beat.youtube_id } }           : {}),
-            },
-            _source:     "verified_placement",
-            _fromLibrary: true,
-          };
-          // De-dupe: only inject if this title isn't already in live results
-          const existingTitles = (retestData.metadata?.music || []).map(m => (m.title||"").toLowerCase().trim());
-          if (!existingTitles.includes((beat.last_result||"").toLowerCase().trim())) {
-            if (!retestData.metadata) retestData.metadata = { music: [], humming: [] };
-            retestData.metadata.music = [injected, ...(retestData.metadata.music || [])];
-          }
-          retestData.status = { code: 0, msg: "Success" };
-        }
-
-        const clientKey = req.body.client_key || null;
-        const clientBpm = req.body.client_bpm ? parseFloat(req.body.client_bpm) : null;
-        const metadata  = retestData?.metadata || {};
-        const acrBpm    = metadata.beats?.bpm || metadata.music?.[0]?.bpm || null;
-        const acrKey    = metadata.music?.[0]?.key?.note
-          ? (metadata.music[0].key.note + (metadata.music[0].key.scale ? " " + metadata.music[0].key.scale : ""))
-          : null;
-        const bpm      = acrBpm || clientBpm;
-        const audioKey = acrKey || clientKey;
-
-        return res.json({
-          ...retestData,
-          fingerprint_id: beat.fingerprint_id || reHash,
-          bpm,
-          audio_key: audioKey,
-          _retest: true,   // flag so the frontend knows this was a re-test
-        });
-      }
-    }
-
-    // Hash the FULL file — permanent fingerprint ID is always based on the complete audio
+    // ── Step 1: Hash the file immediately — this is the universal beat identity ──
+    // Must happen before ANY other logic so every code path has access to it.
     const audioHash     = computeAudioHash(req.file.buffer);
     const fingerprintId = audioHash;
 
-    // ── Knowledge base lookup ─────────────────────────────────────────────────
-    // Check the permanent fingerprint_knowledge table first — this survives
-    // user deletions and grows with every verification across all users.
-    // If we already know what this beat is, return it instantly.
+    // ── Step 2: Knowledge base lookup — runs for EVERY scan, EVERY user ──────────
+    // This is the core of the learning system. Checks the permanent
+    // fingerprint_knowledge table before doing anything else — no ACR call,
+    // no duplicate check, no library lookup needed if we already know the answer.
     const knownPlacement = await knowledgeGet(fingerprintId);
     if (knownPlacement) {
       console.log(`Knowledge base hit: ${fingerprintId} → "${knownPlacement.title}"`);
 
-      // Register this beat for the new user so they get monitoring + library entry
       if (user_id && SUPABASE_URL) {
         try {
-          const storagePath = `${user_id}/${req.file.originalname}`;
-          await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
-          await sbInsert("beats", {
-            user_id,
-            filename:       req.file.originalname,
-            storage_path:   storagePath,
-            status:         "placed",
-            last_scanned:   new Date().toISOString(),
-            last_result:    knownPlacement.title,
-            last_artist:    knownPlacement.artist   || null,
-            spotify_id:     knownPlacement.spotify_id || null,
-            youtube_id:     knownPlacement.youtube_id || null,
-            track_url:      knownPlacement.track_url  || null,
-            uploaded_at:    new Date().toISOString(),
-            fingerprint_id: fingerprintId,
-            audio_hash:     audioHash,
-          });
-          const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
-          const profile   = profiles?.[0];
-          if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used: (profile.submissions_used || 0) + 1 });
+          // Check if this user already has this beat — if so just update last_scanned
+          const userExisting = await sbSelect("beats", `user_id=eq.${user_id}&fingerprint_id=eq.${encodeURIComponent(fingerprintId)}`);
+          if (Array.isArray(userExisting) && userExisting.length > 0) {
+            await sbUpdate("beats", `id=eq.${userExisting[0].id}`, {
+              last_scanned: new Date().toISOString(),
+              // Patch in DSP data if this beat record was missing it
+              ...(knownPlacement.spotify_id && !userExisting[0].spotify_id ? { spotify_id: knownPlacement.spotify_id } : {}),
+              ...(knownPlacement.youtube_id && !userExisting[0].youtube_id ? { youtube_id: knownPlacement.youtube_id } : {}),
+              status: "placed",
+              last_result: knownPlacement.title,
+              last_artist: knownPlacement.artist || userExisting[0].last_artist || null,
+            });
+          } else {
+            // New user scanning this beat — register it for them immediately as placed
+            const storagePath = `${user_id}/${req.file.originalname}`;
+            await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
+            await sbInsert("beats", {
+              user_id,
+              filename:       req.file.originalname,
+              storage_path:   storagePath,
+              status:         "placed",
+              last_scanned:   new Date().toISOString(),
+              last_result:    knownPlacement.title,
+              last_artist:    knownPlacement.artist    || null,
+              spotify_id:     knownPlacement.spotify_id || null,
+              youtube_id:     knownPlacement.youtube_id || null,
+              track_url:      knownPlacement.track_url  || null,
+              uploaded_at:    new Date().toISOString(),
+              fingerprint_id: fingerprintId,
+              audio_hash:     audioHash,
+            });
+            // Only increment submission count for brand-new registrations
+            const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
+            const profile   = profiles?.[0];
+            if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used: (profile.submissions_used || 0) + 1 });
+          }
         } catch (regErr) { console.error("Knowledge-base beat registration error (non-fatal):", regErr.message); }
       }
 
@@ -1307,6 +1249,57 @@ app.post("/scan", (req, res, next) => {
       });
     }
     // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Step 3: Per-user access + quota checks (only reached if knowledge base missed) ──
+    if (user_id && SUPABASE_URL) {
+      const status = await getSubscriptionStatus(user_id);
+      if (!status.hasAccess) return res.status(403).json({ error: status.pastDue ? "Your payment is past due. Please update billing to continue scanning." : "Your free trial has ended. Subscribe to continue scanning." });
+      if (status.submissionLimit!==null && status.submissionsUsed>=status.submissionLimit) return res.status(403).json({ error:`Submission limit reached (${status.submissionsUsed}/${status.submissionLimit}). Upgrade to scan more beats.` });
+
+      const DAILY_CAP = 50;
+      const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+      const todayBeats = await sbSelect("beats", `user_id=eq.${user_id}&created_at=gte.${todayStart.toISOString()}`);
+      if (Array.isArray(todayBeats) && todayBeats.length >= DAILY_CAP) {
+        return res.status(429).json({ error:`Daily limit of ${DAILY_CAP} uploads reached. Come back tomorrow.` });
+      }
+
+      // Re-test: beat already in this user's library — run a fresh scan and inject
+      // any existing verified placement so the result is always up to date.
+      const existing = await sbSelect("beats", `user_id=eq.${user_id}&fingerprint_id=eq.${encodeURIComponent(fingerprintId)}`);
+      if (Array.isArray(existing) && existing.length > 0) {
+        const beat = existing[0];
+        const freshAcrData = await scanAllEngines(req.file.buffer, req.file.originalname, req.file.mimetype);
+        await sbUpdate("beats", `id=eq.${beat.id}`, { last_scanned: new Date().toISOString() });
+
+        const retestData = JSON.parse(JSON.stringify(freshAcrData || { status:{ code:1001, msg:"No result" }, metadata:{ music:[], humming:[] } }));
+        if (beat.status === "placed" && beat.last_result) {
+          const injected = {
+            title:    beat.last_result,
+            artists:  beat.last_artist ? [{ name: beat.last_artist }] : [],
+            score:    100,
+            release_date: null,
+            external_metadata: {
+              ...(beat.spotify_id ? { spotify: { track: { id: beat.spotify_id } } } : {}),
+              ...(beat.youtube_id ? { youtube: { vid: beat.youtube_id } }           : {}),
+            },
+            _source:      "verified_placement",
+            _fromLibrary: true,
+          };
+          const existingTitles = (retestData.metadata?.music || []).map(m => (m.title||"").toLowerCase().trim());
+          if (!existingTitles.includes((beat.last_result||"").toLowerCase().trim())) {
+            if (!retestData.metadata) retestData.metadata = { music: [], humming: [] };
+            retestData.metadata.music = [injected, ...(retestData.metadata.music || [])];
+          }
+          retestData.status = { code: 0, msg: "Success" };
+        }
+        const clientKey = req.body.client_key || null;
+        const clientBpm = req.body.client_bpm ? parseFloat(req.body.client_bpm) : null;
+        const md = retestData?.metadata || {};
+        const rBpm = md.beats?.bpm || md.music?.[0]?.bpm || null;
+        const rKey = md.music?.[0]?.key?.note ? (md.music[0].key.note + (md.music[0].key.scale ? " " + md.music[0].key.scale : "")) : null;
+        return res.json({ ...retestData, fingerprint_id: beat.fingerprint_id || fingerprintId, bpm: rBpm || clientBpm, audio_key: rKey || clientKey, _retest: true });
+      }
+    }
 
     // Fan out across 5 slices × 2 engines (ACRCloud + AudD), all in parallel
     const acrData = await scanAllEngines(req.file.buffer, req.file.originalname, req.file.mimetype);
