@@ -77,6 +77,12 @@ async function sbInsert(table, row) {
     method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Prefer":"return=representation"}, body:JSON.stringify(row),
   });
   const text = await r.text();
+  if (!r.ok) {
+    // Parse error detail from Supabase if available
+    let detail = text;
+    try { const j = JSON.parse(text); detail = j.message || j.details || j.hint || text; } catch(e) {}
+    throw new Error(`sbInsert(${table}) HTTP ${r.status}: ${detail.slice(0,300)}`);
+  }
   if (!text || !text.trim()) return null;
   try { return JSON.parse(text); } catch(e) { console.error("sbInsert parse error:", table, r.status, text.slice(0,200)); return null; }
 }
@@ -625,14 +631,50 @@ app.post("/auth/signup", async (req, res) => {
     // Send branded welcome email (non-blocking)
     if (RESEND_KEY) {
       sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(username)).catch(console.error);
-      // Notify admin of new signup
+      // Notify admin of new signup — bold, branded, high-contrast
       sendEmail("trackmyplacements@gmail.com", `New signup: @${username}`, baseEmail(`
-        <div style="display:inline-block;padding:4px 12px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);border-radius:999px;margin-bottom:16px;">
-          <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.6);letter-spacing:.04em;">New user signed up</span>
+        <!-- Badge -->
+        <div style="display:inline-flex;align-items:center;gap:7px;padding:5px 13px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.14);border-radius:999px;margin-bottom:22px;">
+          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#4ec47a;box-shadow:0 0 8px 2px rgba(78,196,122,0.5);"></span>
+          <span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.7);letter-spacing:.1em;text-transform:uppercase;">New signup</span>
         </div>
-        <div style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-.4px;margin-bottom:8px;">@${username}</div>
-        <div style="font-size:13px;color:rgba(238,234,226,0.5);margin-bottom:4px;">${email}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.28);margin-top:10px;font-family:monospace;">IP: ${ip} &nbsp;·&nbsp; ${new Date().toUTCString()}</div>
+
+        <!-- Username — the hero line -->
+        <div style="font-size:36px;font-weight:800;color:#ffffff;letter-spacing:-.8px;line-height:1.1;margin-bottom:6px;">@${username}</div>
+
+        <!-- Divider -->
+        <div style="height:1px;background:rgba(255,255,255,0.08);margin:20px 0;"></div>
+
+        <!-- Details table -->
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:24px;">
+          <tr>
+            <td style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
+              <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.1em;">Email</span>
+            </td>
+            <td style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;">
+              <span style="font-size:13px;color:#eeeae2;font-weight:500;">${email}</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
+              <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.1em;">Signed up</span>
+            </td>
+            <td style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;">
+              <span style="font-size:13px;color:#eeeae2;font-weight:500;">${new Date().toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/New_York"})} ET</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;">
+              <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.1em;">IP</span>
+            </td>
+            <td style="padding:10px 0;text-align:right;">
+              <span style="font-size:12px;color:rgba(238,234,226,0.45);font-family:monospace;">${ip}</span>
+            </td>
+          </tr>
+        </table>
+
+        <!-- CTA -->
+        <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#050508;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-weight:700;font-size:13px;padding:12px 22px;border-radius:10px;text-decoration:none;letter-spacing:.03em;">View dashboard ↗</a>
       `)).catch(console.error);
     }
 
