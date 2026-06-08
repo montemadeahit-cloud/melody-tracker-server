@@ -74,21 +74,21 @@ app.get("/admin/reset-ratelimit", (req, res) => {
 // ── Supabase helpers ──────────────────────────────────────────
 async function sbInsert(table, row) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Prefer":"return=representation"}, body:JSON.stringify(row),
+    method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`,"Prefer":"return=representation"}, body:JSON.stringify(row),
   });
   const text = await r.text();
   if (!r.ok) {
-    // Parse error detail from Supabase if available
     let detail = text;
     try { const j = JSON.parse(text); detail = j.message || j.details || j.hint || text; } catch(e) {}
-    throw new Error(`sbInsert(${table}) HTTP ${r.status}: ${detail.slice(0,300)}`);
+    console.error(`sbInsert(${table}) failed HTTP ${r.status}: ${detail.slice(0,300)}`);
+    return null;
   }
   if (!text || !text.trim()) return null;
   try { return JSON.parse(text); } catch(e) { console.error("sbInsert parse error:", table, r.status, text.slice(0,200)); return null; }
 }
 async function sbSelect(table, filter) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
-    headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`},
+    headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
   });
   const text = await r.text();
   if (!text || !text.trim()) { console.error("sbSelect empty response:", r.status, table, filter); return []; }
@@ -96,7 +96,7 @@ async function sbSelect(table, filter) {
 }
 async function sbUpdate(table, filter, row) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
-    method:"PATCH", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`}, body:JSON.stringify(row),
+    method:"PATCH", headers:{"Content-Type":"application/json","apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`}, body:JSON.stringify(row),
   });
   const text = await r.text();
   if (!text || !text.trim()) return null;
@@ -104,7 +104,7 @@ async function sbUpdate(table, filter, row) {
 }
 async function sbDelete(table, filter) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
-    method:"DELETE", headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`},
+    method:"DELETE", headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
   }); return r.ok;
 }
 
