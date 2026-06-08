@@ -5,6 +5,13 @@ const crypto     = require("crypto");
 const fetch      = require("node-fetch");
 const FormData   = require("form-data");
 
+// ── Global crash guards ───────────────────────────────────────
+// Prevent ANY unhandled error or rejected promise from killing the process.
+// Railway will restart the container on crash, but that causes downtime.
+// Log everything so bugs are still visible in Railway logs.
+process.on("uncaughtException",  (err) => console.error("UNCAUGHT EXCEPTION:", err?.message, err?.stack));
+process.on("unhandledRejection", (err) => console.error("UNHANDLED REJECTION:", err?.message || err));
+
 const app  = express();
 const port = process.env.PORT || 8080;
 
@@ -1502,6 +1509,7 @@ app.post("/scan", (req, res, next) => {
             source:      "auto_scan",
           }).catch(e => console.error("Knowledge write from auto-scan (non-fatal):", e.message));
         }
+      } catch(dbErr) { console.error("Post-scan DB error (non-fatal):", dbErr.message); }
     }
 
     // Return ACR data with fingerprint ID appended so frontend can display it
