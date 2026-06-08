@@ -1239,15 +1239,31 @@ app.get("/scan-debug", async (req, res) => {
           fingerprint_id: "DEBUG-TEST-" + Date.now(),
           audio_hash: "DEBUG-TEST-" + Date.now(),
         };
-        const inserted = await sbInsert("beats", testRow);
-        if (inserted && (Array.isArray(inserted) ? inserted[0]?.id : inserted?.id)) {
-          const id = Array.isArray(inserted) ? inserted[0].id : inserted.id;
-          results.beats_insert = `OK — id=${id}`;
-          // Clean up
-          await sbDelete("beats", `id=eq.${id}`);
-          results.beats_delete = "OK";
+        // Call Supabase directly so we can capture the raw error response
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/beats`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_SERVICE,
+            "Authorization": `Bearer ${SUPABASE_SERVICE}`,
+            "Prefer": "return=representation",
+          },
+          body: JSON.stringify(testRow),
+        });
+        const text = await r.text();
+        if (!r.ok) {
+          results.beats_insert = `FAILED HTTP ${r.status}: ${text.slice(0, 500)}`;
         } else {
-          results.beats_insert = `FAILED — sbInsert returned: ${JSON.stringify(inserted)}`;
+          let parsed;
+          try { parsed = JSON.parse(text); } catch(e) { parsed = text; }
+          const id = Array.isArray(parsed) ? parsed[0]?.id : parsed?.id;
+          if (id) {
+            results.beats_insert = `OK — id=${id}`;
+            await sbDelete("beats", `id=eq.${id}`);
+            results.beats_delete = "OK";
+          } else {
+            results.beats_insert = `No id returned: ${text.slice(0, 200)}`;
+          }
         }
       } catch(e) { results.beats_insert = `ERROR: ${e.message}`; }
     } else {
@@ -1287,14 +1303,14 @@ app.post("/scan", (req, res, next) => {
     const { user_id } = req.body;
 
     // ── Step 1: Hash the file immediately — this is the universal beat identity ──
-    // Must happen before ANY other logic so every code path has access to it.
     const audioHash     = computeAudioHash(req.file.buffer);
     const fingerprintId = audioHash;
 
-    // Normalize MIME type — iOS reports .m4a files as video/mp4 which confuses
-    // some services. Treat any video/mp4 upload as audio/mp4 for processing.
+    // Normalize MIME type — iOS reports .m4a files as video/mp4
     const normalizedMime = req.file.mimetype === "video/mp4" ? "audio/mp4" : req.file.mimetype;
     req.file.mimetype = normalizedMime;
+
+    console.log(`SCAN START — user=${user_id} file="${req.file.originalname}" size=${req.file.size} mime=${normalizedMime} fp=${fingerprintId}`);
 
     // ── Step 2: Knowledge base lookup — runs for EVERY scan, EVERY user ──────────
     // This is the core of the learning system. Checks the permanent
@@ -1302,7 +1318,7 @@ app.post("/scan", (req, res, next) => {
     // no duplicate check, no library lookup needed if we already know the answer.
     const knownPlacement = await knowledgeGet(fingerprintId);
     if (knownPlacement) {
-      console.log(`Knowledge base hit: ${fingerprintId} → "${knownPlacement.title}"`);
+      console.log(`SCAN PATH: knowledge base hit — fp=${fingerprintId} title="${knownPlacement.title}"`);
 
       if (user_id && SUPABASE_URL) {
         try {
@@ -1369,9 +1385,10 @@ app.post("/scan", (req, res, next) => {
 
     // ── Step 3: Per-user access + quota checks (only reached if knowledge base missed) ──
     if (user_id && SUPABASE_URL) {
+      console.log(`SCAN PATH: step3 access check — user=${user_id}`);
       const status = await getSubscriptionStatus(user_id);
-      if (!status.hasAccess) return res.status(403).json({ error: status.pastDue ? "Your payment is past due. Please update billing to continue scanning." : "Your free trial has ended. Subscribe to continue scanning." });
-      if (status.submissionLimit!==null && status.submissionsUsed>=status.submissionLimit) return res.status(403).json({ error:`Submission limit reached (${status.submissionsUsed}/${status.submissionLimit}). Upgrade to scan more beats.` });
+      if (!status.hasAccess) { console.log(`SCAN PATH: no access`); return res.status(403).json({ error: status.pastDue ? "Your payment is past due. Please update billing to continue scanning." : "Your free trial has ended. Subscribe to continue scanning." }); }
+      if (status.submissionLimit!==null && status.submissionsUsed>=status.submissionLimit) { console.log(`SCAN PATH: limit reached`); return res.status(403).json({ error:`Submission limit reached (${status.submissionsUsed}/${status.submissionLimit}). Upgrade to scan more beats.` }); }
 
       const DAILY_CAP = 50;
       const todayStart = new Date(); todayStart.setHours(0,0,0,0);
@@ -1380,10 +1397,9 @@ app.post("/scan", (req, res, next) => {
         return res.status(429).json({ error:`Daily limit of ${DAILY_CAP} uploads reached. Come back tomorrow.` });
       }
 
-      // Re-test: beat already in this user's library — run a fresh scan and inject
-      // any existing verified placement so the result is always up to date.
       const existing = await sbSelect("beats", `user_id=eq.${user_id}&fingerprint_id=eq.${encodeURIComponent(fingerprintId)}`);
       if (Array.isArray(existing) && existing.length > 0) {
+        console.log(`SCAN PATH: re-test — beat already exists id=${existing[0].id} status=${existing[0].status}`);
         const beat = existing[0];
         const freshAcrData = await scanAllEngines(req.file.buffer, req.file.originalname, req.file.mimetype);
         await sbUpdate("beats", `id=eq.${beat.id}`, { last_scanned: new Date().toISOString() });
@@ -1418,7 +1434,8 @@ app.post("/scan", (req, res, next) => {
       }
     }
 
-    // Fan out across 5 slices × 2 engines (ACRCloud + AudD), all in parallel
+    // Fan out across all engines
+    console.log(`SCAN PATH: new beat — running ACR scan for user=${user_id} file="${req.file.originalname}"`);
     const acrData = await scanAllEngines(req.file.buffer, req.file.originalname, req.file.mimetype);
 
     // Extract BPM, key, duration from ACRCloud response if available
@@ -1514,10 +1531,10 @@ app.post("/scan", (req, res, next) => {
           console.error("Storage upload failed (non-fatal — beat will still be saved):", uploadErr.message);
         }
 
-        // ── Beat DB insert — this is the critical step ──────────
-        // Always runs regardless of whether storage upload succeeded.
+        // ── Beat DB insert — critical step ──────────
         let insertedBeat = null;
         try {
+          console.log(`SCAN INSERT: attempting beats insert for user=${user_id} file="${req.file.originalname}"`);
           const insertResult = await sbInsert("beats", {
             user_id,
             filename:       req.file.originalname,
