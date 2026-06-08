@@ -1208,6 +1208,69 @@ app.post("/verify-placement", async (req, res) => {
   } catch (e) { console.error("verify-placement error:", e.message); res.status(500).json({ error: e.message }); }
 });
 
+// ── Scan debug — tests every DB + storage operation ──────────
+// Hit GET /scan-debug?user_id=YOUR_USER_ID to see exactly what's failing
+app.get("/scan-debug", async (req, res) => {
+  const { user_id } = req.query;
+  const results = {};
+  try {
+    // 1. Can we read profiles?
+    try {
+      const p = user_id ? await sbSelect("profiles", `id=eq.${user_id}`) : await sbSelect("profiles", "limit=1");
+      results.profiles_read = Array.isArray(p) ? `OK (${p.length} rows)` : `unexpected: ${JSON.stringify(p)}`;
+    } catch(e) { results.profiles_read = `ERROR: ${e.message}`; }
+
+    // 2. Can we read beats?
+    try {
+      const b = user_id ? await sbSelect("beats", `user_id=eq.${user_id}&limit=3`) : await sbSelect("beats", "limit=1");
+      results.beats_read = Array.isArray(b) ? `OK (${b.length} rows)` : `unexpected: ${JSON.stringify(b)}`;
+    } catch(e) { results.beats_read = `ERROR: ${e.message}`; }
+
+    // 3. Can we insert a beat? (test row, deleted immediately)
+    if (user_id) {
+      try {
+        const testRow = {
+          user_id,
+          filename: "__debug_test__.mp3",
+          storage_path: null,
+          status: "monitoring",
+          last_scanned: new Date().toISOString(),
+          uploaded_at: new Date().toISOString(),
+          fingerprint_id: "DEBUG-TEST-" + Date.now(),
+          audio_hash: "DEBUG-TEST-" + Date.now(),
+        };
+        const inserted = await sbInsert("beats", testRow);
+        if (inserted && (Array.isArray(inserted) ? inserted[0]?.id : inserted?.id)) {
+          const id = Array.isArray(inserted) ? inserted[0].id : inserted.id;
+          results.beats_insert = `OK — id=${id}`;
+          // Clean up
+          await sbDelete("beats", `id=eq.${id}`);
+          results.beats_delete = "OK";
+        } else {
+          results.beats_insert = `FAILED — sbInsert returned: ${JSON.stringify(inserted)}`;
+        }
+      } catch(e) { results.beats_insert = `ERROR: ${e.message}`; }
+    } else {
+      results.beats_insert = "SKIPPED — pass ?user_id=xxx to test";
+    }
+
+    // 4. Can we read fingerprint_knowledge?
+    try {
+      const k = await sbSelect("fingerprint_knowledge", "limit=1");
+      results.knowledge_read = Array.isArray(k) ? `OK (${k.length} rows)` : `unexpected: ${JSON.stringify(k)}`;
+    } catch(e) { results.knowledge_read = `ERROR: ${e.message}`; }
+
+    // 5. Supabase keys set?
+    results.supabase_url    = SUPABASE_URL ? "SET" : "MISSING";
+    results.supabase_key    = SUPABASE_KEY ? "SET" : "MISSING";
+    results.supabase_service = SUPABASE_SERVICE ? "SET" : "MISSING";
+
+    res.json({ ok: true, results });
+  } catch(e) {
+    res.json({ ok: false, error: e.message, results });
+  }
+});
+
 // ── Scan ──────────────────────────────────────────────────────
 app.post("/scan", (req, res, next) => {
   upload.single("file")(req, res, (err) => {
