@@ -1187,7 +1187,7 @@ app.post("/verify-placement", async (req, res) => {
     };
     if (spotify_id)  updatePayload.spotify_id  = spotify_id;
     if (youtube_id)  updatePayload.youtube_id  = youtube_id;
-    if (track_url && !spotify_id && !youtube_id) updatePayload.track_url = track_url;
+    // Note: track_url is stored in fingerprint_knowledge only, not in beats table
 
     const updated = await sbUpdate("beats", `id=eq.${beat.id}`, updatePayload);
     console.log("Manual placement verified:", beat.id, "→", title, platform || "spotify", spotify_id || youtube_id || track_url || "(no id)");
@@ -1348,7 +1348,6 @@ app.post("/scan", (req, res, next) => {
               last_artist:    knownPlacement.artist    || null,
               spotify_id:     knownPlacement.spotify_id || null,
               youtube_id:     knownPlacement.youtube_id || null,
-              track_url:      knownPlacement.track_url  || null,
               uploaded_at:    new Date().toISOString(),
               fingerprint_id: fingerprintId,
               audio_hash:     audioHash,
