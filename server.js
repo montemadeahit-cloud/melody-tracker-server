@@ -1035,6 +1035,78 @@ app.get("/soundcloud-track", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Fingerprint knowledge base ────────────────────────────────
+// Global, append-only table: fingerprint_id → verified placement.
+// Independent of any user's beat library — survives deletions, teaches
+// the algorithm permanently. Written on every human verification and on
+// every high-confidence auto-match. Read before ACRCloud on every scan.
+//
+// Required Supabase SQL (run once):
+//   CREATE TABLE IF NOT EXISTS fingerprint_knowledge (
+//     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+//     fingerprint_id  text NOT NULL,
+//     title           text NOT NULL,
+//     artist          text,
+//     spotify_id      text,
+//     youtube_id      text,
+//     track_url       text,
+//     platform        text,
+//     verified_by     uuid,          -- user_id who first verified (nullable)
+//     verified_at     timestamptz DEFAULT now(),
+//     confidence      integer DEFAULT 100,
+//     source          text DEFAULT 'user_verified'
+//   );
+//   CREATE UNIQUE INDEX IF NOT EXISTS fingerprint_knowledge_fp_title
+//     ON fingerprint_knowledge (fingerprint_id, lower(title));
+
+async function knowledgeGet(fingerprint_id) {
+  try {
+    const rows = await sbSelect(
+      "fingerprint_knowledge",
+      `fingerprint_id=eq.${encodeURIComponent(fingerprint_id)}&order=confidence.desc&limit=1`
+    );
+    return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  } catch(e) { console.error("knowledgeGet error:", e.message); return null; }
+}
+
+async function knowledgeWrite({ fingerprint_id, title, artist, spotify_id, youtube_id, track_url, platform, verified_by, confidence, source }) {
+  if (!fingerprint_id || !title) return;
+  try {
+    // Upsert by fingerprint_id + normalised title — idempotent, safe to call repeatedly
+    const existing = await sbSelect(
+      "fingerprint_knowledge",
+      `fingerprint_id=eq.${encodeURIComponent(fingerprint_id)}&title=ilike.${encodeURIComponent(title.trim())}`
+    );
+    if (Array.isArray(existing) && existing.length > 0) {
+      // Update DSP data if we now have richer info
+      const row = existing[0];
+      const patch = {};
+      if (spotify_id  && !row.spotify_id)  patch.spotify_id  = spotify_id;
+      if (youtube_id  && !row.youtube_id)  patch.youtube_id  = youtube_id;
+      if (track_url   && !row.track_url)   patch.track_url   = track_url;
+      if (artist      && !row.artist)      patch.artist      = artist;
+      if (confidence  && confidence > (row.confidence || 0)) patch.confidence = confidence;
+      if (Object.keys(patch).length > 0) {
+        await sbUpdate("fingerprint_knowledge", `id=eq.${row.id}`, patch);
+      }
+    } else {
+      await sbInsert("fingerprint_knowledge", {
+        fingerprint_id,
+        title:       title.trim(),
+        artist:      artist  || null,
+        spotify_id:  spotify_id  || null,
+        youtube_id:  youtube_id  || null,
+        track_url:   track_url   || null,
+        platform:    platform    || null,
+        verified_by: verified_by || null,
+        confidence:  confidence  || 100,
+        source:      source      || "user_verified",
+      });
+    }
+    console.log(`Knowledge written: ${fingerprint_id} → "${title}"`);
+  } catch(e) { console.error("knowledgeWrite error:", e.message); }
+}
+
 // ── Manual placement verification (user-submitted platform link) ──
 // When a scan finds NO match but the producer knows where the beat is
 // placed, they paste a platform link in the UI. The frontend verifies
@@ -1066,12 +1138,23 @@ app.post("/verify-placement", async (req, res) => {
     };
     if (spotify_id)  updatePayload.spotify_id  = spotify_id;
     if (youtube_id)  updatePayload.youtube_id  = youtube_id;
-    // For Apple Music / SoundCloud, store the direct URL in a note field if the column exists
-    // (gracefully ignored by Supabase if column doesn't exist)
     if (track_url && !spotify_id && !youtube_id) updatePayload.track_url = track_url;
 
     const updated = await sbUpdate("beats", `id=eq.${beat.id}`, updatePayload);
     console.log("Manual placement verified:", beat.id, "→", title, platform || "spotify", spotify_id || youtube_id || track_url || "(no id)");
+
+    // ── Write to permanent knowledge base ──────────────────────
+    // This is the key learning step — regardless of what happens to this
+    // user's library, the knowledge that fingerprint X = song Y is now
+    // stored permanently and will benefit every future scan of this beat.
+    await knowledgeWrite({
+      fingerprint_id: beat.fingerprint_id || fingerprint_id,
+      title, artist, spotify_id, youtube_id, track_url, platform,
+      verified_by: user_id,
+      confidence:  100,
+      source:      "user_verified",
+    });
+
     res.json({ success: true, beat: Array.isArray(updated) ? updated[0] : (updated || { id: beat.id }) });
   } catch (e) { console.error("verify-placement error:", e.message); res.status(500).json({ error: e.message }); }
 });
@@ -1168,6 +1251,62 @@ app.post("/scan", (req, res, next) => {
     // Hash the FULL file — permanent fingerprint ID is always based on the complete audio
     const audioHash     = computeAudioHash(req.file.buffer);
     const fingerprintId = audioHash;
+
+    // ── Knowledge base lookup ─────────────────────────────────────────────────
+    // Check the permanent fingerprint_knowledge table first — this survives
+    // user deletions and grows with every verification across all users.
+    // If we already know what this beat is, return it instantly.
+    const knownPlacement = await knowledgeGet(fingerprintId);
+    if (knownPlacement) {
+      console.log(`Knowledge base hit: ${fingerprintId} → "${knownPlacement.title}"`);
+
+      // Register this beat for the new user so they get monitoring + library entry
+      if (user_id && SUPABASE_URL) {
+        try {
+          const storagePath = `${user_id}/${req.file.originalname}`;
+          await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
+          await sbInsert("beats", {
+            user_id,
+            filename:       req.file.originalname,
+            storage_path:   storagePath,
+            status:         "placed",
+            last_scanned:   new Date().toISOString(),
+            last_result:    knownPlacement.title,
+            last_artist:    knownPlacement.artist   || null,
+            spotify_id:     knownPlacement.spotify_id || null,
+            youtube_id:     knownPlacement.youtube_id || null,
+            track_url:      knownPlacement.track_url  || null,
+            uploaded_at:    new Date().toISOString(),
+            fingerprint_id: fingerprintId,
+            audio_hash:     audioHash,
+          });
+          const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
+          const profile   = profiles?.[0];
+          if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used: (profile.submissions_used || 0) + 1 });
+        } catch (regErr) { console.error("Knowledge-base beat registration error (non-fatal):", regErr.message); }
+      }
+
+      const injected = {
+        title:    knownPlacement.title,
+        artists:  knownPlacement.artist ? [{ name: knownPlacement.artist }] : [],
+        score:    100,
+        release_date: null,
+        external_metadata: {
+          ...(knownPlacement.spotify_id ? { spotify: { track: { id: knownPlacement.spotify_id } } } : {}),
+          ...(knownPlacement.youtube_id ? { youtube: { vid: knownPlacement.youtube_id } }           : {}),
+        },
+        _source:      "knowledge_base",
+        _fromLibrary: true,
+      };
+      return res.json({
+        status:         { code: 0, msg: "Success" },
+        metadata:       { music: [injected], humming: [] },
+        fingerprint_id: fingerprintId,
+        bpm:            null,
+        audio_key:      null,
+      });
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Fan out across 5 slices × 2 engines (ACRCloud + AudD), all in parallel
     const acrData = await scanAllEngines(req.file.buffer, req.file.originalname, req.file.mimetype);
@@ -1292,6 +1431,22 @@ app.post("/scan", (req, res, next) => {
         const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
         const profile   = profiles?.[0];
         if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used:(profile.submissions_used||0)+1 });
+
+        // ── Teach the knowledge base from high-confidence auto-matches ──────
+        // If ACRCloud/AudD returned a good match, write it to fingerprint_knowledge
+        // so future scans of the same beat get an instant answer without an API call.
+        if (matched && title) {
+          knowledgeWrite({
+            fingerprint_id: fingerprintId,
+            title,
+            artist:     artist     || null,
+            spotify_id: spotifyId  || null,
+            youtube_id: youtubeId  || null,
+            verified_by: user_id,
+            confidence:  95,   // slightly below 100 — auto-match, not human-verified
+            source:      "auto_scan",
+          }).catch(e => console.error("Knowledge write from auto-scan (non-fatal):", e.message));
+        }
 
         // No "Placement found" email here on purpose. The producer is looking
         // at the results right now and confirms the placement themselves via
