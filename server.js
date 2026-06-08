@@ -1105,8 +1105,64 @@ app.post("/scan", (req, res, next) => {
         return res.status(429).json({ error:`Daily limit of ${DAILY_CAP} uploads reached. Come back tomorrow.` });
       }
 
+      // ── Re-test: if this beat was already submitted, return the existing record instead of erroring ──
+      // This lets the algorithm learn — the verified placement comes back in scan results,
+      // and the beat stays in the monitoring queue for daily rescans.
       const existing = await sbSelect("beats", `user_id=eq.${user_id}&filename=eq.${encodeURIComponent(req.file.originalname)}`);
-      if (Array.isArray(existing)&&existing.length>0) return res.status(400).json({ error:`"${req.file.originalname}" has already been submitted.` });
+      if (Array.isArray(existing) && existing.length > 0) {
+        const beat = existing[0];
+        // Always re-hash and re-fingerprint (file contents may have changed)
+        const reHash = computeAudioHash(req.file.buffer);
+
+        // Run a fresh scan so the results stay current and the algorithm sees new data
+        const freshAcrData = await scanAllEngines(req.file.buffer, req.file.originalname, req.file.mimetype);
+
+        // Bump last_scanned so daily rescan deprioritises this one for a while
+        await sbUpdate("beats", `id=eq.${beat.id}`, { last_scanned: new Date().toISOString() });
+
+        // If the beat has a user-verified placement, inject it into the music array
+        // so the frontend surfaces it even if the live scan missed it this time.
+        const retestData = JSON.parse(JSON.stringify(freshAcrData || { status:{ code:1001, msg:"No result" }, metadata:{ music:[], humming:[] } }));
+        if (beat.status === "placed" && beat.last_result) {
+          const injected = {
+            title:    beat.last_result,
+            artists:  beat.last_artist ? [{ name: beat.last_artist }] : [],
+            score:    100,   // treated as verified — always surfaces as confident
+            release_date: null,
+            external_metadata: {
+              ...(beat.spotify_id ? { spotify: { track: { id: beat.spotify_id } } } : {}),
+              ...(beat.youtube_id ? { youtube: { vid: beat.youtube_id } }           : {}),
+            },
+            _source:     "verified_placement",
+            _fromLibrary: true,
+          };
+          // De-dupe: only inject if this title isn't already in live results
+          const existingTitles = (retestData.metadata?.music || []).map(m => (m.title||"").toLowerCase().trim());
+          if (!existingTitles.includes((beat.last_result||"").toLowerCase().trim())) {
+            if (!retestData.metadata) retestData.metadata = { music: [], humming: [] };
+            retestData.metadata.music = [injected, ...(retestData.metadata.music || [])];
+          }
+          retestData.status = { code: 0, msg: "Success" };
+        }
+
+        const clientKey = req.body.client_key || null;
+        const clientBpm = req.body.client_bpm ? parseFloat(req.body.client_bpm) : null;
+        const metadata  = retestData?.metadata || {};
+        const acrBpm    = metadata.beats?.bpm || metadata.music?.[0]?.bpm || null;
+        const acrKey    = metadata.music?.[0]?.key?.note
+          ? (metadata.music[0].key.note + (metadata.music[0].key.scale ? " " + metadata.music[0].key.scale : ""))
+          : null;
+        const bpm      = acrBpm || clientBpm;
+        const audioKey = acrKey || clientKey;
+
+        return res.json({
+          ...retestData,
+          fingerprint_id: beat.fingerprint_id || reHash,
+          bpm,
+          audio_key: audioKey,
+          _retest: true,   // flag so the frontend knows this was a re-test
+        });
+      }
     }
 
     // Hash the FULL file — permanent fingerprint ID is always based on the complete audio
