@@ -1179,6 +1179,11 @@ app.post("/scan", (req, res, next) => {
     const audioHash     = computeAudioHash(req.file.buffer);
     const fingerprintId = audioHash;
 
+    // Normalize MIME type — iOS reports .m4a files as video/mp4 which confuses
+    // some services. Treat any video/mp4 upload as audio/mp4 for processing.
+    const normalizedMime = req.file.mimetype === "video/mp4" ? "audio/mp4" : req.file.mimetype;
+    req.file.mimetype = normalizedMime;
+
     // ── Step 2: Knowledge base lookup — runs for EVERY scan, EVERY user ──────────
     // This is the core of the learning system. Checks the permanent
     // fingerprint_knowledge table before doing anything else — no ACR call,
@@ -1384,50 +1389,65 @@ app.post("/scan", (req, res, next) => {
         const youtubeId  = bestMatch?.external_metadata?.youtube?.vid || null;
         const storagePath = `${user_id}/${req.file.originalname}`;
 
-        await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
-        // NOTE: we do NOT auto-mark a scan match as "placed" anymore. Even a
-        // high-confidence hit is only a *candidate* until the producer confirms
-        // it in the UI (which calls /verify-placement and flips it to "placed").
-        // We still remember the detected candidate so it survives reload and so
-        // the rescan job doesn't re-flag the same match.
-        await sbInsert("beats", {
-          user_id,
-          filename:       req.file.originalname,
-          storage_path:   storagePath,
-          status:         "monitoring",
-          last_scanned:   new Date().toISOString(),
-          last_result:    title,
-          last_artist:    artist || null,
-          spotify_id:     spotifyId || null,
-          youtube_id:     youtubeId || null,
-          uploaded_at:    new Date().toISOString(),
-          fingerprint_id: fingerprintId,
-          audio_hash:     audioHash,
-          bpm:            bpm || null,
-          audio_key:      audioKey || null,
-          duration_ms:    durationMs || null,
-        });
+        // ── Storage upload — non-blocking ───────────────────────
+        // Failures here must NEVER prevent the beat from being saved to the DB.
+        // The audio file is only needed for rescanning; the library entry is
+        // what the user sees and must always be created.
+        let uploadedPath = null;
+        try {
+          await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
+          uploadedPath = storagePath;
+          console.log(`Storage upload OK: ${storagePath}`);
+        } catch(uploadErr) {
+          console.error("Storage upload failed (non-fatal — beat will still be saved):", uploadErr.message);
+        }
 
-        // Also append to a permanent fingerprint log on the profile — survives beat deletion
+        // ── Beat DB insert — this is the critical step ──────────
+        // Always runs regardless of whether storage upload succeeded.
+        let insertedBeat = null;
+        try {
+          const insertResult = await sbInsert("beats", {
+            user_id,
+            filename:       req.file.originalname,
+            storage_path:   uploadedPath,   // null if upload failed — rescan will skip it
+            status:         "monitoring",
+            last_scanned:   new Date().toISOString(),
+            last_result:    title,
+            last_artist:    artist || null,
+            spotify_id:     spotifyId || null,
+            youtube_id:     youtubeId || null,
+            uploaded_at:    new Date().toISOString(),
+            fingerprint_id: fingerprintId,
+            audio_hash:     audioHash,
+            bpm:            bpm || null,
+            audio_key:      audioKey || null,
+            duration_ms:    durationMs || null,
+          });
+          insertedBeat = Array.isArray(insertResult) ? insertResult[0] : insertResult;
+          console.log(`Beat saved to DB: ${insertedBeat?.id || "(no id returned)"} — "${req.file.originalname}" user=${user_id}`);
+        } catch(insertErr) {
+          console.error("CRITICAL: Beat DB insert failed:", insertErr.message, "user=", user_id, "file=", req.file.originalname);
+        }
+
+        // Append to fingerprint log on profile (non-fatal)
         try {
           const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
           const profile  = profiles?.[0];
           const existing = profile?.fingerprint_log || [];
           const entry    = { id: fingerprintId, hash: audioHash, filename: req.file.originalname, registered_at: new Date().toISOString() };
-          // Only add if not already in the log (idempotent)
           if (!existing.find(function(e){ return e.id === fingerprintId; })) {
             await sbUpdate("profiles", `id=eq.${user_id}`, { fingerprint_log: [...existing, entry] });
           }
         } catch(logErr) { console.error("Fingerprint log error (non-fatal):", logErr.message); }
 
-        // Increment submission counter
-        const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
-        const profile   = profiles?.[0];
-        if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used:(profile.submissions_used||0)+1 });
+        // Increment submission counter (non-fatal)
+        try {
+          const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
+          const profile   = profiles?.[0];
+          if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used:(profile.submissions_used||0)+1 });
+        } catch(countErr) { console.error("Submission count error (non-fatal):", countErr.message); }
 
-        // ── Teach the knowledge base from high-confidence auto-matches ──────
-        // If ACRCloud/AudD returned a good match, write it to fingerprint_knowledge
-        // so future scans of the same beat get an instant answer without an API call.
+        // Teach the knowledge base from high-confidence auto-matches (non-fatal)
         if (matched && title) {
           knowledgeWrite({
             fingerprint_id: fingerprintId,
@@ -1436,16 +1456,10 @@ app.post("/scan", (req, res, next) => {
             spotify_id: spotifyId  || null,
             youtube_id: youtubeId  || null,
             verified_by: user_id,
-            confidence:  95,   // slightly below 100 — auto-match, not human-verified
+            confidence:  95,
             source:      "auto_scan",
           }).catch(e => console.error("Knowledge write from auto-scan (non-fatal):", e.message));
         }
-
-        // No "Placement found" email here on purpose. The producer is looking
-        // at the results right now and confirms the placement themselves via
-        // the verify step. The confirmation email (if any) belongs to the
-        // background rescan path, where there's no human in the loop.
-      } catch(dbErr) { console.error("Post-scan error (non-fatal):",dbErr.message); }
     }
 
     // Return ACR data with fingerprint ID appended so frontend can display it
