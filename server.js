@@ -1693,6 +1693,7 @@ app.post("/subscribe", async (req, res) => {
     console.log("Creating checkout session for customer:", customerId, "price:", priceId);
     const session = await stripeRequest("/checkout/sessions","POST",{
       customer:customerId, mode:"subscription",
+      allow_promotion_codes:"true",
       "line_items[0][price]":priceId, "line_items[0][quantity]":"1",
       "metadata[user_id]":user_id, "metadata[tier]":tier||"tier1",
       "subscription_data[metadata][user_id]":user_id, "subscription_data[metadata][tier]":tier||"tier1",
