@@ -54,6 +54,21 @@ function getLimits(tier) { return LIMITS[tier] || LIMITS.trial; }
 // regardless of trial/Stripe state. Matched case-insensitively.
 const COMP_TIER2 = new Set(["montemadethis"]);
 
+// Usernames in this set are always granted full Tier 1 access (free, never billed),
+// regardless of trial/Stripe state. Matched case-insensitively.
+// To remove a comp later, just delete the username from this set.
+const COMP_TIER1 = new Set(["prodbycaset"]); // casetbeats@gmail.com — manual Tier 1 grant
+
+// ── Card-required trial config ────────────────────────────────
+// NEW signups (card_required = true) must enter a card to start a Stripe-native
+// 3-day trial that auto-bills the chosen tier afterward. EXISTING users
+// (card_required falsy) are completely unaffected and keep the old cardless trial.
+const CARD_REQUIRED_TRIAL_DAYS = 3;
+// During a card-required trial, grant the limits of the tier being trialed
+// (a true "free trial of Tier 1/2"). Set to false to cap trials at the basic
+// LIMITS.trial (25 scans / 0 monitors) instead.
+const TRIAL_USES_TIER_LIMITS = true;
+
 // ── IP helpers ────────────────────────────────────────────────
 function getIP(req) {
   return req.headers["x-forwarded-for"]?.split(",")[0].trim()
@@ -523,6 +538,64 @@ async function getSubscriptionStatus(user_id) {
     };
   }
 
+  // Comped accounts — always full Tier 1, never gated by trial/billing.
+  if (profile.username && COMP_TIER1.has(profile.username.toLowerCase())) {
+    const compLimits = getLimits("tier1");
+    return {
+      hasAccess: true, trialActive: false, subscriptionActive: true, pastDue: false,
+      daysLeft: 9999, trialEnd: new Date(Date.now() + 9999*24*60*60*1000).toISOString(),
+      tier: "tier1", tierLabel: compLimits.label,
+      submissionsUsed: profile.submissions_used || 0, submissionLimit: compLimits.submissions,
+      emailMonitorsUsed: profile.email_monitors_used || 0, emailMonitorLimit: compLimits.emailMonitors,
+    };
+  }
+
+  // ── NEW card-required flow ──────────────────────────────────
+  // Only applies to NEW signups (card_required = true). Access is driven entirely
+  // by the Stripe subscription status, since a card is on file and Stripe owns the
+  // trial + billing. Existing users (card_required falsy) skip this block entirely.
+  if (profile.card_required) {
+    const now    = new Date();
+    const status = profile.subscription_status; // incomplete | trialing | active | past_due | cancelled
+    const subscriptionActive = status === "active";
+    const trialActive        = status === "trialing";
+    const pastDue            = status === "past_due";
+
+    // Trial end: prefer the exact Stripe trial end; fall back to trial_start + N days.
+    let trialEnd = profile.trial_end_at
+      ? new Date(profile.trial_end_at)
+      : (profile.trial_start
+          ? new Date(new Date(profile.trial_start).getTime() + CARD_REQUIRED_TRIAL_DAYS*24*60*60*1000)
+          : now);
+    const daysLeft = trialActive ? Math.max(0, Math.ceil((trialEnd - now)/(1000*60*60*24))) : 0;
+
+    // Tier being trialed / subscribed to (defaults to tier1).
+    const tier = (subscriptionActive || trialActive) ? (profile.tier || "tier1") : null;
+
+    // Monthly reset for active paid tiers (same rule as the legacy path).
+    let submissionsUsed = profile.submissions_used || 0;
+    let emailMonitorsUsed = profile.email_monitors_used || 0;
+    if (subscriptionActive && profile.submissions_reset_at) {
+      const oneMonth = new Date(new Date(profile.submissions_reset_at).getTime() + 30*24*60*60*1000);
+      if (now > oneMonth) {
+        submissionsUsed = 0; emailMonitorsUsed = 0;
+        await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used:0, email_monitors_used:0, submissions_reset_at:now.toISOString() });
+      }
+    }
+
+    // During the trial, grant the chosen tier's limits unless TRIAL_USES_TIER_LIMITS=false.
+    const limitTier = (trialActive && !TRIAL_USES_TIER_LIMITS) ? "trial" : (tier || "trial");
+    const limits = getLimits(limitTier);
+    return {
+      hasAccess: (trialActive || subscriptionActive) && !pastDue,
+      trialActive, subscriptionActive, pastDue, daysLeft,
+      trialEnd: trialEnd.toISOString(), tier, tierLabel: limits.label,
+      submissionsUsed, submissionLimit: limits.submissions,
+      emailMonitorsUsed, emailMonitorLimit: limits.emailMonitors,
+    };
+  }
+
+  // ── LEGACY flow (existing signups) — unchanged ──────────────
   const trialStart = profile.trial_start ? new Date(profile.trial_start) : new Date();
   const trialEnd   = new Date(trialStart.getTime() + 3*24*60*60*1000);
   const now        = new Date();
@@ -593,7 +666,9 @@ app.post("/auth/signup", async (req, res) => {
       const ipProfiles = await sbSelect("profiles", `signup_ip=eq.${encodeURIComponent(ip)}`);
       if (Array.isArray(ipProfiles)&&ipProfiles.length>0) {
         for (const p of ipProfiles) {
-          if (p.subscription_status==="active") continue;
+          // Only legacy cardless trials (status "trial") count toward the IP block.
+          // New card-required signups (status "incomplete") are gated by the card itself.
+          if (p.subscription_status !== "trial") continue;
           const te = new Date((p.trial_start ? new Date(p.trial_start) : new Date(p.created_at)).getTime() + 3*24*60*60*1000);
           if (new Date() < te) return res.status(429).json({ error:"A free trial is already active from this network. Subscribe to continue." });
         }
@@ -627,7 +702,10 @@ app.post("/auth/signup", async (req, res) => {
         email_monitors_used: 0,
         submissions_reset_at: new Date().toISOString(),
         signup_ip: ip,
-        subscription_status: "trial",
+        // NEW card-required trial: account exists but has NO access until the user
+        // completes Stripe Checkout (card on file) which starts the 3-day trial.
+        card_required: true,
+        subscription_status: "incomplete",
       });
       console.log("Profile insert result:", JSON.stringify(insertResult)?.slice(0,200));
     } catch(profileErr) {
@@ -1691,14 +1769,26 @@ app.post("/subscribe", async (req, res) => {
     }
 
     console.log("Creating checkout session for customer:", customerId, "price:", priceId);
-    const session = await stripeRequest("/checkout/sessions","POST",{
+    const checkoutBody = {
       customer:customerId, mode:"subscription",
       allow_promotion_codes:"true",
       "line_items[0][price]":priceId, "line_items[0][quantity]":"1",
       "metadata[user_id]":user_id, "metadata[tier]":tier||"tier1",
       "subscription_data[metadata][user_id]":user_id, "subscription_data[metadata][tier]":tier||"tier1",
       success_url:`${APP_URL}?subscribed=true`, cancel_url:`${APP_URL}?cancelled=true`,
-    });
+    };
+    // Card-required 3-day trial — NEW signups only. Forces a card on file at checkout
+    // (payment_method_collection=always), runs a free trial, then auto-bills the chosen
+    // tier. If somehow no card ends up on file, the trial cancels instead of billing.
+    // EXISTING users (card_required falsy) get the original immediate-bill checkout.
+    if (profile?.card_required) {
+      checkoutBody["subscription_data[trial_period_days]"]   = String(CARD_REQUIRED_TRIAL_DAYS);
+      checkoutBody["payment_method_collection"]              = "always";
+      checkoutBody["subscription_data[trial_settings][end_behavior][missing_payment_method]"] = "cancel";
+      // Record the tier they chose now so the trial shows the right plan before the webhook lands.
+      await sbUpdate("profiles", `id=eq.${user_id}`, { tier: tier==="tier2" ? "tier2" : "tier1" });
+    }
+    const session = await stripeRequest("/checkout/sessions","POST", checkoutBody);
     console.log("Session:", session.url, session.error);
     if (session.error) return res.status(400).json({ error:session.error.message });
 
@@ -1763,20 +1853,38 @@ app.post("/webhook", async (req, res) => {
       return { userId, tier };
     }
 
+    // Map a Stripe subscription status to our profiles.subscription_status value.
+    function mapStripeStatus(s) {
+      if (s === "trialing") return "trialing";
+      if (s === "active")   return "active";
+      if (s === "past_due") return "past_due";
+      if (s === "canceled" || s === "unpaid") return "cancelled";
+      if (s === "incomplete" || s === "incomplete_expired") return "incomplete";
+      return null;
+    }
+
     if (event.type==="checkout.session.completed") {
       const s = event.data.object;
       let { userId, tier } = await resolveUser(s);
-      // Also try fetching the subscription for its metadata if we still don't have user
-      if (!userId && s.subscription) {
+      let stripeStatus = null, trialEndIso = null;
+      // Fetch the subscription to read its real status (trialing vs active) + trial end.
+      if (s.subscription) {
         try {
           const sub = await stripeRequest(`/subscriptions/${s.subscription}`);
           const resolved = await resolveUser(sub);
-          if (resolved.userId) { userId = resolved.userId; tier = resolved.tier; }
+          if (resolved.userId) userId = resolved.userId;
+          if (resolved.tier)   tier   = resolved.tier;
+          stripeStatus = sub.status;
+          trialEndIso  = sub.trial_end ? new Date(sub.trial_end*1000).toISOString() : null;
         } catch(e) { console.error("Sub fetch error:", e.message); }
       }
       if (userId) {
-        await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"active", tier, submissions_used:0, submissions_reset_at:new Date().toISOString(), email_monitors_used:0 });
-        console.log("Activated:",userId,"tier:",tier);
+        // Default to "active" for legacy (no-trial) checkouts where status fetch failed.
+        const mapped = mapStripeStatus(stripeStatus) || "active";
+        const update = { subscription_status: mapped, tier, submissions_used:0, submissions_reset_at:new Date().toISOString(), email_monitors_used:0 };
+        if (trialEndIso) { update.trial_end_at = trialEndIso; update.trial_start = new Date().toISOString(); }
+        await sbUpdate("profiles",`id=eq.${userId}`, update);
+        console.log("Checkout completed:",userId,"status:",mapped,"tier:",tier);
       } else { console.error("checkout.session.completed — could not resolve user. customer:", s.customer, "metadata:", JSON.stringify(s.metadata)); }
     }
 
@@ -1784,8 +1892,16 @@ app.post("/webhook", async (req, res) => {
       const s = event.data.object;
       const { userId, tier } = await resolveUser(s);
       if (userId) {
-        // Only update to active — never mark past_due from subscription events
-        // past_due is handled exclusively by invoice.payment_failed
+        const trialEndIso = s.trial_end ? new Date(s.trial_end*1000).toISOString() : null;
+        // Trialing — card-required trial in progress. Grant access.
+        if (s.status==="trialing") {
+          const u = { subscription_status:"trialing", tier };
+          if (trialEndIso) u.trial_end_at = trialEndIso;
+          await sbUpdate("profiles",`id=eq.${userId}`, u);
+          console.log("Sub trialing:",userId,tier,"ends",trialEndIso);
+        }
+        // Active — trial converted or paid outright. Never mark past_due here;
+        // that is handled exclusively by invoice.payment_failed.
         if (s.status==="active") {
           await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"active", tier });
           console.log("Sub active:",userId,tier);
