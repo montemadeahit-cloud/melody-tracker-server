@@ -178,7 +178,7 @@ function normaliseAuddResult(r) {
   const score = r.score != null ? r.score * 100 : 85; // AudD returns 0–1
   const external_metadata = {};
   if (r.spotify?.id)         external_metadata.spotify = { track: { id: r.spotify.id }, popularity: r.spotify.popularity || null };
-  if (r.itunes?.trackId)     external_metadata.itunes  = { track: { id: r.itunes.trackId } };
+  if (r.itunes?.trackId)     external_metadata.itunes  = { track: { id: r.itunes.trackId }, url: r.itunes.trackViewUrl || null };
   if (r.deezer?.id)          external_metadata.deezer  = { track: { id: String(r.deezer.id) } };
   if (r.youtube?.videoid)    external_metadata.youtube = { vid: r.youtube.videoid };
   return {
