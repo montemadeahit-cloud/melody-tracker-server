@@ -159,11 +159,14 @@ async function storageDelete(path) {
 const SLICE_BYTES    = 32 * 1024 * 25;  // ~25s at 256kbps equiv
 const MIN_SCAN_BYTES = 32 * 1024 * 15;  // skip slicing if file is under ~15s
 const FULL_PASS_MAX  = 32 * 1024 * 90;  // include full buffer pass if file is under ~90s
-function getSlices(buffer) {
+function getSlices(buffer, rescan) {
   if (buffer.length <= MIN_SCAN_BYTES) return [buffer];
   const s   = SLICE_BYTES;
   const len = buffer.length;
-  const offsets = [0.15, 0.38, 0.62, 0.85].map(p => Math.floor(len * p));
+  // On rescan, chop at DIFFERENT positions than the first scan so we cover
+  // sections the original slices missed — widens placement detection over time.
+  const positions = rescan ? [0.05, 0.27, 0.50, 0.73, 0.93] : [0.15, 0.38, 0.62, 0.85];
+  const offsets = positions.map(p => Math.floor(len * p));
   const slices = offsets.map(o => buffer.slice(o, Math.min(o + s, len)));
   // Also include the full buffer as an extra pass for shorter tracks
   if (len <= FULL_PASS_MAX) slices.push(buffer);
@@ -339,8 +342,8 @@ async function identifyShazam(buffer, filename) {
 }
 
 // ── Fan-out: all slices × all three engines, fully parallel ───
-async function scanAllEngines(buffer, filename, mimetype) {
-  const slices = getSlices(buffer);
+async function scanAllEngines(buffer, filename, mimetype, rescan) {
+  const slices = getSlices(buffer, rescan);
   // Fire all ACRCloud slices + AudD + Shazam on every slice simultaneously
   const tasks = [
     ...slices.map(s => identifyACR(s, filename, mimetype)),
@@ -703,7 +706,7 @@ app.post("/auth/signup", async (req, res) => {
         submissions_reset_at: new Date().toISOString(),
         signup_ip: ip,
         // NEW card-required trial: account exists but has NO access until the user
-        // completes Stripe Checkout (card on file) which starts the 3-day trial.
+        // completes Stripe Checkout (card on file) which starts the 7-day trial.
         card_required: true,
         subscription_status: "incomplete",
       });
@@ -1777,7 +1780,7 @@ app.post("/subscribe", async (req, res) => {
       "subscription_data[metadata][user_id]":user_id, "subscription_data[metadata][tier]":tier||"tier1",
       success_url:`${APP_URL}?subscribed=true`, cancel_url:`${APP_URL}?cancelled=true`,
     };
-    // Card-required 3-day trial — NEW signups only. Forces a card on file at checkout
+    // Card-required 7-day trial — NEW signups only. Forces a card on file at checkout
     // (payment_method_collection=always), runs a free trial, then auto-bills the chosen
     // tier. If somehow no card ends up on file, the trial cancels instead of billing.
     // EXISTING users (card_required falsy) get the original immediate-bill checkout.
@@ -2021,7 +2024,7 @@ app.post("/rescan", async (req, res) => {
           const rProfiles = await sbSelect("profiles", `id=eq.${beat.user_id}`);
           rescanProducerSince = rProfiles?.[0]?.producer_since ? parseInt(rProfiles[0].producer_since) : null;
         } catch(e) { /* non-fatal */ }
-        const acrData=await scanAllEngines(buffer, beat.filename, "audio/mpeg");
+        const acrData=await scanAllEngines(buffer, beat.filename, "audio/mpeg", true);
         const rawMatched = acrData?.status?.code===0;
         const scanMusic  = acrData?.metadata?.music || [];
         // Same confident threshold as frontend and scan endpoint:
