@@ -61,9 +61,9 @@ const COMP_TIER1 = new Set(["prodbycaset"]); // casetbeats@gmail.com — manual 
 
 // ── Card-required trial config ────────────────────────────────
 // NEW signups (card_required = true) must enter a card to start a Stripe-native
-// 3-day trial that auto-bills the chosen tier afterward. EXISTING users
+// 7-day trial that auto-bills the chosen tier afterward. EXISTING users
 // (card_required falsy) are completely unaffected and keep the old cardless trial.
-const CARD_REQUIRED_TRIAL_DAYS = 3;
+const CARD_REQUIRED_TRIAL_DAYS = 7;
 // During a card-required trial, grant the limits of the tier being trialed
 // (a true "free trial of Tier 1/2"). Set to false to cap trials at the basic
 // LIMITS.trial (25 scans / 0 monitors) instead.
