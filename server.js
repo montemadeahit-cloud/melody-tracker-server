@@ -293,46 +293,50 @@ async function identifyAudd(buffer, filename) {
   }
 }
 
-// ── Shazam (via RapidAPI) ─────────────────────────────────────
+// ── Shazam (via RapidAPI — DashyData "Shazam Song Recognition API") ──────────
 // Third fingerprint engine — different algorithm and database to ACRCloud/AudD.
 // Particularly strong on rap/trap/R&B instrumentals.
-// Requires RAPIDAPI_KEY env var.
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+// Requires RAPIDAPI_KEY env var (subscribe to the API on RapidAPI first).
+// Endpoint: POST /recognize/file — raw audio bytes as application/octet-stream.
+const RAPIDAPI_KEY  = process.env.RAPIDAPI_KEY;
+const SHAZAM_HOST   = "shazam-song-recognition-api.p.rapidapi.com";
+function shazamSpotifyId(uri) {
+  if (!uri) return null;
+  // handles "spotify:track:ID", ".../track/ID?...", "open.spotify.com/track/ID"
+  const m = uri.match(/track[:/]([A-Za-z0-9]{16,})/);
+  return m ? m[1] : null;
+}
 async function identifyShazam(buffer, filename) {
   if (!RAPIDAPI_KEY) return null;
   try {
-    const form = new FormData();
-    form.append("upload_file", buffer, { filename, contentType: "audio/mpeg" });
-    const res = await fetch("https://shazam-song-recognizer.p.rapidapi.com/recognize/file", {
+    const res = await fetch(`https://${SHAZAM_HOST}/recognize/file`, {
       method: "POST",
       headers: {
+        "Content-Type":    "application/octet-stream",
         "x-rapidapi-key":  RAPIDAPI_KEY,
-        "x-rapidapi-host": "shazam-song-recognizer.p.rapidapi.com",
+        "x-rapidapi-host": SHAZAM_HOST,
       },
-      body: form,
+      body: buffer,                       // raw audio bytes
     });
-    if (!res.ok) return null;
+    if (!res.ok) { console.error("Shazam HTTP", res.status); return null; }
     const data = await res.json();
-    // Shazam returns { track: { title, subtitle, key, sections, hub } }
-    const track = data?.track;
+    // Shazam-style payload. Be tolerant of a few common nestings.
+    const track = data?.track || data?.matches?.[0]?.track || data?.result?.track || data?.result || null;
     if (!track || !track.title) return null;
     const external_metadata = {};
-    // Extract Spotify link from hub actions if present
-    const spotifyAction = track.hub?.actions?.find(a => a.uri && a.uri.includes("spotify"));
-    if (spotifyAction) {
-      const spotifyId = spotifyAction.uri.split("/track/")[1]?.split("?")[0];
-      if (spotifyId) external_metadata.spotify = { track: { id: spotifyId } };
-    }
-    // Extract Apple Music link
-    const appleAction = track.hub?.actions?.find(a => a.uri && a.uri.includes("apple"));
+    const actions = track.hub?.actions || track.hub?.options?.flatMap(o => o.actions || []) || [];
+    const spotifyAction = actions.find(a => a && a.uri && a.uri.includes("spotify"));
+    const spotifyId = shazamSpotifyId(spotifyAction?.uri);
+    if (spotifyId) external_metadata.spotify = { track: { id: spotifyId } };
+    const appleAction = actions.find(a => a && a.uri && a.uri.includes("apple"));
     if (appleAction) external_metadata.itunes = { uri: appleAction.uri };
     const norm = {
-      title:             track.title,
-      artists:           track.subtitle ? [{ name: track.subtitle }] : [],
-      release_date:      null,
-      score:             90, // Shazam doesn't return a confidence score — treat hits as high confidence
+      title:        track.title,
+      artists:      track.subtitle ? [{ name: track.subtitle }] : [],
+      release_date: null,
+      score:        90,   // Shazam returns no confidence score — treat hits as high-confidence
       external_metadata,
-      _source:           "shazam",
+      _source:      "shazam",
     };
     return { status: { code: 0, msg: "Success" }, metadata: { music: [norm], humming: [] } };
   } catch(e) {
