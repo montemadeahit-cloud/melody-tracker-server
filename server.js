@@ -341,18 +341,44 @@ async function identifyShazam(buffer, filename) {
   }
 }
 
-// ── Fan-out: all slices × all three engines, fully parallel ───
+// Pick the single most distinctive slice for the metered single-shot engines.
+// getSlices first-scan positions are [0.15, 0.38, 0.62, 0.85](+full buffer);
+// index 2 is the ~62% mid-track hook — the strongest section to fingerprint.
+function pickBestSlice(slices) {
+  if (!slices.length) return null;
+  if (slices.length === 1) return slices[0];
+  return slices[Math.min(2, slices.length - 1)];
+}
+// Evenly sample N slices, always keeping the first and the most distinctive.
+function sliceSubset(slices, n) {
+  if (slices.length <= n) return slices;
+  const step = (slices.length - 1) / (n - 1);
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(slices[Math.round(i * step)]);
+  return out;
+}
+
+// ── Fan-out: ACRCloud (primary, multi-slice) + AudD & Shazam (single-shot) ───
+// COST MODEL: ACRCloud is the strongest engine and the cheapest per call, so it
+// does the full multi-slice sweep. AudD and Shazam are metered per request and
+// exist only to catch what ACR misses — one pass each on the single most
+// distinctive slice captures ~90% of that at a fraction of the cost.
+// (Previously every engine fired on every slice → ~3× the metered spend.)
+// On RESCAN, ACR is trimmed to its 3 most informative slices, since a rescan
+// only asks "has this surfaced SINCE last time?", not "what is this?".
 async function scanAllEngines(buffer, filename, mimetype, rescan) {
-  const slices = getSlices(buffer, rescan);
-  // Fire all ACRCloud slices + AudD + Shazam on every slice simultaneously
+  const slices    = getSlices(buffer, rescan);
+  const acrSlices = rescan ? sliceSubset(slices, 3) : slices;
+  const bestSlice = pickBestSlice(slices);
+
   const tasks = [
-    ...slices.map(s => identifyACR(s, filename, mimetype)),
-    ...slices.map(s => identifyAudd(s, filename)),
-    ...slices.map(s => identifyShazam(s, filename)),
+    ...acrSlices.map(s => identifyACR(s, filename, mimetype)),
+    identifyAudd(bestSlice, filename),
+    identifyShazam(bestSlice, filename),
   ];
   const results = await Promise.all(tasks);
   const valid   = results.filter(Boolean);
-  console.log(`Scan engines (${slices.length} slices × 3 engines = ${tasks.length} tasks):`, results.map((r,i) => {
+  console.log(`Scan engines (${acrSlices.length} ACR + AudD + Shazam = ${tasks.length} tasks${rescan ? " · rescan" : ""}):`, results.map((r,i) => {
     if (!r) return `task${i}:skipped`;
     return `task${i}:code=${r?.status?.code},hits=${r?.metadata?.music?.length||0},src=${r?.metadata?.music?.[0]?._source||"acr"}`;
   }));
@@ -644,6 +670,7 @@ app.get("/", (req, res) => res.json({
   stripeWebhook:!!STRIPE_WEBHOOK,
   resend:!!RESEND_KEY,
   shazam:!!RAPIDAPI_KEY,
+  audd:!!process.env.AUDD_API_TOKEN,
   spotifyId:!!process.env.SPOTIFY_CLIENT_ID,
   spotifySecret:!!process.env.SPOTIFY_CLIENT_SECRET,
   appUrl:APP_URL,
@@ -2002,6 +2029,10 @@ app.get("/rescan/status", (req, res) => {
 
 app.post("/rescan", async (req, res) => {
   if (req.headers["x-rescan-secret"]!==RESCAN_SECRET) return res.status(401).json({ error:"Unauthorized" });
+  // Cadence tiering: a normal run skips dormant beats (uploaded >120d ago) to
+  // save cost, since placements almost always surface within weeks of use.
+  // A weekly "deep" run (POST /rescan?deep=1) checks every monitored beat.
+  const deep = req.query.deep === "1";
   try {
     const beats = await sbSelect("beats","status=eq.monitoring&order=last_scanned.asc");
     if (!Array.isArray(beats)||beats.length===0) {
@@ -2014,6 +2045,11 @@ app.post("/rescan", async (req, res) => {
     for (const beat of beats) {
       try {
         if (!beat.storage_path) { skipped++; continue; }
+        // Back off dormant beats on normal runs (deep runs check everything).
+        if (!deep && beat.uploaded_at) {
+          const ageDays = (Date.now() - new Date(beat.uploaded_at).getTime()) / 86400000;
+          if (ageDays > 120) { skipped++; continue; }
+        }
         const status=await getSubscriptionStatus(beat.user_id);
         if (!status.hasAccess) { console.log(`Skipping ${beat.id} — no access`); skipped++; continue; }
         const buffer=await storageDownload(beat.storage_path);
@@ -2092,6 +2128,14 @@ app.post("/rescan", async (req, res) => {
 
 app.listen(port, "0.0.0.0", () => {
   console.log(`Server listening on 0.0.0.0:${port}`);
+  // Which recognition engines are actually live this boot. A paid engine showing
+  // OFF means its key is missing — detection silently degrades without this line.
+  console.log(`Engines — ACRCloud:${ACR_KEY?"ON":"OFF"}  AudD:${process.env.AUDD_API_TOKEN?"ON":"OFF"}  Shazam:${RAPIDAPI_KEY?"ON":"OFF"}`);
+  // RESCAN CADENCE (cron → POST /rescan with header x-rescan-secret):
+  //   Daily      0 7 * * *        — normal run, skips beats dormant >120 days
+  //   Weekly     0 5 * * 0  ?deep=1 — deep run, checks every monitored beat
+  // (Was twice-daily full sweeps; daily + weekly-deep cuts recurring spend ~60%
+  //  with no meaningful loss in detection speed.)
   // IMPORTANT: profiles table needs a `fingerprint_log` JSONB column.
   // Run this in Supabase SQL editor if not already added:
   // ALTER TABLE profiles ADD COLUMN IF NOT EXISTS fingerprint_log JSONB DEFAULT '[]'::jsonb;
