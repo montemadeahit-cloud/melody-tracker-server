@@ -2029,10 +2029,6 @@ app.get("/rescan/status", (req, res) => {
 
 app.post("/rescan", async (req, res) => {
   if (req.headers["x-rescan-secret"]!==RESCAN_SECRET) return res.status(401).json({ error:"Unauthorized" });
-  // Cadence tiering: a normal run skips dormant beats (uploaded >120d ago) to
-  // save cost, since placements almost always surface within weeks of use.
-  // A weekly "deep" run (POST /rescan?deep=1) checks every monitored beat.
-  const deep = req.query.deep === "1";
   try {
     const beats = await sbSelect("beats","status=eq.monitoring&order=last_scanned.asc");
     if (!Array.isArray(beats)||beats.length===0) {
@@ -2045,11 +2041,6 @@ app.post("/rescan", async (req, res) => {
     for (const beat of beats) {
       try {
         if (!beat.storage_path) { skipped++; continue; }
-        // Back off dormant beats on normal runs (deep runs check everything).
-        if (!deep && beat.uploaded_at) {
-          const ageDays = (Date.now() - new Date(beat.uploaded_at).getTime()) / 86400000;
-          if (ageDays > 120) { skipped++; continue; }
-        }
         const status=await getSubscriptionStatus(beat.user_id);
         if (!status.hasAccess) { console.log(`Skipping ${beat.id} — no access`); skipped++; continue; }
         const buffer=await storageDownload(beat.storage_path);
@@ -2132,10 +2123,9 @@ app.listen(port, "0.0.0.0", () => {
   // OFF means its key is missing — detection silently degrades without this line.
   console.log(`Engines — ACRCloud:${ACR_KEY?"ON":"OFF"}  AudD:${process.env.AUDD_API_TOKEN?"ON":"OFF"}  Shazam:${RAPIDAPI_KEY?"ON":"OFF"}`);
   // RESCAN CADENCE (cron → POST /rescan with header x-rescan-secret):
-  //   Daily      0 7 * * *        — normal run, skips beats dormant >120 days
-  //   Weekly     0 5 * * 0  ?deep=1 — deep run, checks every monitored beat
-  // (Was twice-daily full sweeps; daily + weekly-deep cuts recurring spend ~60%
-  //  with no meaningful loss in detection speed.)
+  //   Once daily, e.g. 0 7 * * * — checks every monitored beat.
+  // (Was twice daily. Once a day halves recurring spend; combined with the
+  //  single-shot AudD/Shazam fan-out, total recognition cost is way down.)
   // IMPORTANT: profiles table needs a `fingerprint_log` JSONB column.
   // Run this in Supabase SQL editor if not already added:
   // ALTER TABLE profiles ADD COLUMN IF NOT EXISTS fingerprint_log JSONB DEFAULT '[]'::jsonb;
