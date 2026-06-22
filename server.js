@@ -42,10 +42,16 @@ const STRIPE_WEBHOOK   = process.env.STRIPE_WEBHOOK_SECRET;
 const APP_URL          = process.env.APP_URL || "https://trackmyplacements.com";
 
 // ── Tier limits ───────────────────────────────────────────────
+// NOTE ON COST: every monitored beat is rescanned on a schedule across the
+// recognition engines, so the *number of beats a user keeps monitored* — not
+// the price — is what drives recurring spend. These caps bound that exposure.
+// To change Tier 2 to 200, just change its `submissions` (and `emailMonitors`)
+// below from 150 to 200. Unlimited is intentionally NOT used at $19.99 because
+// daily multi-engine rescans make truly-unlimited monitoring unprofitable.
 const LIMITS = {
   trial: { submissions: 25,   emailMonitors: 0,    label: "Free Trial" },
-  tier1: { submissions: 100,  emailMonitors: 100,  label: "Tier 1"     },
-  tier2: { submissions: null, emailMonitors: null, label: "Tier 2"     },
+  tier1: { submissions: 50,   emailMonitors: 50,   label: "Tier 1"     },
+  tier2: { submissions: 150,  emailMonitors: 150,  label: "Tier 2"     },
 };
 function getLimits(tier) { return LIMITS[tier] || LIMITS.trial; }
 
@@ -370,15 +376,32 @@ function sliceSubset(slices, n) {
 // (Previously every engine fired on every slice → ~3× the metered spend.)
 // On RESCAN, ACR is trimmed to its 3 most informative slices, since a rescan
 // only asks "has this surfaced SINCE last time?", not "what is this?".
+// ── Optimal-usage / cost control ──────────────────────────────
+// The recurring cost in this app is the scheduled RESCAN of every monitored
+// beat — it repeats forever, per beat, across engines. The first scan happens
+// once; rescans happen on every cron tick. So secondary metered engines (AudD +
+// Shazam) are most valuable on the FIRST scan (max coverage when it matters) and
+// least cost-efficient on rescans (paying every day to re-confirm the same beat).
+//
+// RESCAN_SECONDARY_ENGINES:
+//   false (default) → rescans run ACRCloud only. Cheapest. ACR is the strongest
+//                     single engine and already sweeps multiple slices; AudD/Shazam
+//                     still run on the first scan and on any user-triggered re-test.
+//   true            → rescans also fire AudD + Shazam (old behaviour, ~2× the
+//                     per-rescan metered spend for marginally more recall).
+const RESCAN_SECONDARY_ENGINES = false;
+
 async function scanAllEngines(buffer, filename, mimetype, rescan) {
   const slices    = getSlices(buffer, rescan);
   const acrSlices = rescan ? sliceSubset(slices, 3) : slices;
   const bestSlice = pickBestSlice(slices);
 
+  // On rescans, secondary engines are skipped by default (see RESCAN_SECONDARY_ENGINES).
+  const useSecondary = !rescan || RESCAN_SECONDARY_ENGINES;
+
   const tasks = [
     ...acrSlices.map(s => identifyACR(s, filename, mimetype)),
-    identifyAudd(bestSlice, filename),
-    identifyShazam(bestSlice, filename),
+    ...(useSecondary ? [identifyAudd(bestSlice, filename), identifyShazam(bestSlice, filename)] : []),
   ];
   const results = await Promise.all(tasks);
   const valid   = results.filter(Boolean);
@@ -1318,6 +1341,62 @@ app.post("/verify-placement", async (req, res) => {
 
     res.json({ success: true, beat: Array.isArray(updated) ? updated[0] : (updated || { id: beat.id }) });
   } catch (e) { console.error("verify-placement error:", e.message); res.status(500).json({ error: e.message }); }
+});
+
+// ── Remove a verified placement (persist the removal) ─────────────
+// The Verified tab is hydrated from the server's "placed" beats on every load,
+// and a scan can re-inject a placement from the permanent knowledge base. So a
+// removal that only touches localStorage reappears on refresh. This endpoint
+// makes the removal stick:
+//   1. Flips the matching beat(s) to status "removed" and clears the placement
+//      fields, so /beats no longer returns it as placed (gone from Verified) and
+//      the rescan cron (which selects status=monitoring) skips it.
+//   2. Deletes THIS user's rows from fingerprint_knowledge for that beat, so a
+//      future scan of the same file won't auto-re-flag it. Other users'
+//      verifications of the same fingerprint are left intact.
+app.post("/remove-placement", async (req, res) => {
+  try {
+    const { user_id, beat_id, fingerprint_id, title } = req.body;
+    if (!user_id || (!beat_id && !fingerprint_id && !title)) {
+      return res.status(400).json({ error: "Missing user_id and a beat reference (beat_id, fingerprint_id, or title)." });
+    }
+
+    // Locate the beat(s) for THIS user — by id, else fingerprint, else title.
+    let beats = [];
+    if (beat_id) {
+      beats = await sbSelect("beats", `id=eq.${beat_id}&user_id=eq.${user_id}`);
+    } else if (fingerprint_id) {
+      beats = await sbSelect("beats", `user_id=eq.${user_id}&fingerprint_id=eq.${encodeURIComponent(fingerprint_id)}`);
+    } else if (title) {
+      beats = await sbSelect("beats", `user_id=eq.${user_id}&last_result=eq.${encodeURIComponent(title)}`);
+    }
+    if (!Array.isArray(beats) || beats.length === 0) {
+      // Nothing server-side to change (e.g. an in-session item never persisted) —
+      // treat as success so the UI can clear it without erroring.
+      return res.json({ success: true, removed: 0 });
+    }
+
+    let removed = 0;
+    for (const beat of beats) {
+      await sbUpdate("beats", `id=eq.${beat.id}`, {
+        status:       "removed",
+        last_result:  null,
+        last_artist:  null,
+        spotify_id:   null,
+        youtube_id:   null,
+        last_scanned: new Date().toISOString(),
+      });
+      removed++;
+      // Remove this user's knowledge rows for this fingerprint so a manual
+      // re-scan won't re-inject the placement we just removed.
+      const fp = beat.fingerprint_id || fingerprint_id;
+      if (fp) {
+        await sbDelete("fingerprint_knowledge", `fingerprint_id=eq.${encodeURIComponent(fp)}&verified_by=eq.${user_id}`);
+      }
+    }
+    console.log(`Placement removed: user=${user_id} beats=${removed} (${beat_id || fingerprint_id || title})`);
+    res.json({ success: true, removed });
+  } catch (e) { console.error("remove-placement error:", e.message); res.status(500).json({ error: e.message }); }
 });
 
 // ── Scan debug — tests every DB + storage operation ──────────
