@@ -42,6 +42,15 @@ app.use(cors({
 app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
+// Baseline security headers
+app.use(function(req, res, next) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
+  next();
+});
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const ACR_HOST         = process.env.ACR_HOST;
@@ -58,6 +67,11 @@ const STRIPE_PRICE_T1  = process.env.STRIPE_PRICE_ID;
 const STRIPE_PRICE_T2  = process.env.STRIPE_PRICE_ID_TIER2;
 const STRIPE_WEBHOOK   = process.env.STRIPE_WEBHOOK_SECRET;
 const APP_URL          = process.env.APP_URL || "https://trackmyplacements.com";
+
+// Security-critical env checks — warn loudly on deploy if anything's missing/weak.
+if (!STRIPE_WEBHOOK) console.error("⚠️  SECURITY: STRIPE_WEBHOOK_SECRET not set — Stripe webhooks are processed WITHOUT signature verification. Anyone could forge subscription events. Set it now.");
+if (!process.env.RESCAN_SECRET) console.error("⚠️  SECURITY: RESCAN_SECRET not set — falling back to a guessable default. Set a strong RESCAN_SECRET.");
+if (!process.env.ADMIN_SECRET) console.warn("ℹ️  ADMIN_SECRET not set — /admin endpoints fall back to RESCAN_SECRET.");
 
 // ── Tier limits ───────────────────────────────────────────────
 // NOTE ON COST: every monitored beat is rescanned on a schedule across the
@@ -111,11 +125,54 @@ function checkSignupRate(ip) {
   entry.count++;
   return true;
 }
-// Clear rate limit for an IP (call this if you get locked out during testing)
+// Reusable in-memory IP rate limiter factory
+function makeRateLimiter(max, windowMs) {
+  const hits = new Map();
+  // opportunistic cleanup so the map can't grow unbounded
+  setInterval(() => { const now = Date.now(); for (const [k, e] of hits) if (now - e.firstAt > windowMs) hits.delete(k); }, windowMs).unref?.();
+  return function(ip) {
+    const now = Date.now();
+    const e = hits.get(ip);
+    if (!e || now - e.firstAt > windowMs) { hits.set(ip, { count:1, firstAt:now }); return true; }
+    if (e.count >= max) return false;
+    e.count++;
+    return true;
+  };
+}
+const checkLoginRate   = makeRateLimiter(12, 15*60*1000); // brute-force guard: 12 / 15 min
+const checkForgotRate  = makeRateLimiter(5,  60*60*1000); // 5 / hour
+const checkSupportRate = makeRateLimiter(8,  60*60*1000); // 8 / hour
+
+// Clear rate limit for an IP (debug). Locked behind an admin secret — was public.
 app.get("/admin/reset-ratelimit", (req, res) => {
+  const secret = process.env.ADMIN_SECRET || RESCAN_SECRET;
+  if ((req.headers["x-admin-secret"] || "") !== secret) return res.status(403).json({ error: "Forbidden" });
   signupAttempts.clear();
   res.json({ cleared: true });
 });
+
+// ── Auth verification ─────────────────────────────────────────
+// Verify a Supabase access token (Bearer header, or ?t= for media tags that
+// can't set headers) and return the authenticated user, or null.
+async function getAuthUser(req) {
+  let token = null;
+  const auth = req.headers["authorization"] || "";
+  if (auth.startsWith("Bearer ")) token = auth.slice(7);
+  if (!token && req.query && req.query.t) token = String(req.query.t);
+  if (!token) return null;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}` } });
+    if (!r.ok) return null;
+    const u = await r.json();
+    return (u && u.id) ? u : null;
+  } catch (e) { return null; }
+}
+// Require a valid token; sends 401 and returns null if absent/invalid.
+async function authOr401(req, res) {
+  const u = await getAuthUser(req);
+  if (!u) { res.status(401).json({ error: "Authentication required. Please sign in again." }); return null; }
+  return u;
+}
 
 // ── Supabase helpers ──────────────────────────────────────────
 async function sbInsert(table, row) {
@@ -536,8 +593,8 @@ function baseEmail(content) {
   <meta name="color-scheme" content="dark"/>
   <title>TrackMyPlacements</title>
 </head>
-<body style="margin:0;padding:0;background:#090910;-webkit-text-size-adjust:100%;">
-<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#090910;padding:32px 16px 48px;">
+<body style="margin:0;padding:0;background:#08080a;-webkit-text-size-adjust:100%;">
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#08080a;padding:32px 16px 48px;">
   <tr><td align="center">
     <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:520px;">
 
@@ -545,7 +602,7 @@ function baseEmail(content) {
       <tr><td style="height:2px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,#ffffff 40%,#ffffff 60%,rgba(255,255,255,0) 100%);border-radius:1px;font-size:0;">&nbsp;</td></tr>
 
       <!-- Card -->
-      <tr><td style="background:linear-gradient(180deg,#17171f 0%,#111118 100%);border:1px solid rgba(255,255,255,0.1);border-top:1px solid rgba(255,255,255,0.2);border-radius:18px;overflow:hidden;">
+      <tr><td style="background:linear-gradient(180deg,#161616 0%,#0b0b0b 100%);border:1px solid rgba(255,255,255,0.09);border-top:1px solid rgba(255,255,255,0.24);border-radius:18px;overflow:hidden;">
 
         <!-- Header -->
         <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
@@ -593,12 +650,12 @@ function baseEmail(content) {
 function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
   const link = spotifyId ? `https://open.spotify.com/track/${spotifyId}` : youtubeId ? `https://youtube.com/watch?v=${youtubeId}` : null;
   const platformLabel = spotifyId ? "Listen on Spotify" : youtubeId ? "Watch on YouTube" : null;
-  const platformBg = spotifyId ? "#1DB954" : youtubeId ? "#FF0000" : "#ffffff";
-  const platformColor = spotifyId || youtubeId ? "#ffffff" : "#050508";
+  const platformBg = "#ffffff";
+  const platformColor = "#050508";
   return baseEmail(`
     <!-- Label -->
-    <div style="display:inline-block;padding:4px 12px;background:rgba(78,196,122,0.12);border:1px solid rgba(78,196,122,0.28);border-radius:999px;margin-bottom:18px;">
-      <span style="font-size:11px;font-weight:600;color:#4ec47a;letter-spacing:.04em;">● Placement found</span>
+    <div style="display:inline-block;padding:4px 12px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.22);border-radius:999px;margin-bottom:18px;">
+      <span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:.04em;">● Placement found</span>
     </div>
 
     <!-- Track info card -->
@@ -868,7 +925,7 @@ app.post("/auth/signup", async (req, res) => {
       sendEmail("trackmyplacements@gmail.com", `New signup: @${username}`, baseEmail(`
         <!-- Badge -->
         <div style="display:inline-flex;align-items:center;gap:7px;padding:5px 13px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.14);border-radius:999px;margin-bottom:22px;">
-          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#4ec47a;box-shadow:0 0 8px 2px rgba(78,196,122,0.5);"></span>
+          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#ffffff;box-shadow:0 0 8px 2px rgba(255,255,255,0.45);"></span>
           <span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.7);letter-spacing:.1em;text-transform:uppercase;">New signup</span>
         </div>
 
@@ -911,18 +968,19 @@ app.post("/auth/signup", async (req, res) => {
       `)).catch(console.error);
     }
 
-    if (accessToken) return res.json({ access_token:accessToken, user:{ id:userId, email:authData.user?.email||email, username } });
+    if (accessToken) return res.json({ access_token:accessToken, refresh_token:authData.refresh_token||null, user:{ id:userId, email:authData.user?.email||email, username } });
 
     const siRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email, password }) });
     const siData = await siRes.json();
     if (siData.error) return res.status(400).json({ error:"Account created! Please sign in." });
-    res.json({ access_token:siData.access_token, user:{ id:siData.user?.id||userId, email:siData.user?.email||email, username } });
+    res.json({ access_token:siData.access_token, refresh_token:siData.refresh_token||null, user:{ id:siData.user?.id||userId, email:siData.user?.email||email, username } });
   } catch(e) { console.error("Signup error:",e.message); res.status(500).json({ error:e.message }); }
 });
 
 // ── Auth: sign in ─────────────────────────────────────────────
 app.post("/auth/signin", async (req, res) => {
   try {
+    if (!checkLoginRate(getIP(req))) return res.status(429).json({ error:"Too many sign-in attempts. Please wait a few minutes and try again." });
     const { username, password } = req.body;
     if (!username||!password) return res.status(400).json({ error:"All fields required." });
     const profiles = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
@@ -939,13 +997,29 @@ app.post("/auth/signin", async (req, res) => {
     if (siData.error||siData.error_description) return res.status(400).json({ error:siData.error_description||siData.error?.message||"Sign in failed." });
     const userId = siData.user?.id || profile.id;
     const userEmail = siData.user?.email || userData.email;
-    res.json({ access_token:siData.access_token, user:{ id:userId, email:userEmail, username:profile.username } });
+    res.json({ access_token:siData.access_token, refresh_token:siData.refresh_token||null, user:{ id:userId, email:userEmail, username:profile.username } });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// ── Auth: refresh access token ────────────────────────────────
+app.post("/auth/refresh", async (req, res) => {
+  try {
+    const { refresh_token } = req.body;
+    if (!refresh_token) return res.status(400).json({ error:"Missing refresh_token." });
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY},
+      body:JSON.stringify({ refresh_token }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.access_token) return res.status(401).json({ error:"Could not refresh session." });
+    res.json({ access_token:d.access_token, refresh_token:d.refresh_token||refresh_token });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
 // ── Auth: forgot password (Resend branded) ────────────────────
 app.post("/auth/forgot-password", async (req, res) => {
   try {
+    if (!checkForgotRate(getIP(req))) return res.status(429).json({ error:"Too many requests. Please wait and try again." });
     const { email } = req.body;
     if (!email) return res.status(400).json({ error:"Email required." });
 
@@ -995,6 +1069,7 @@ app.post("/auth/reset-password", async (req, res) => {
 // ── Support / Feedback ────────────────────────────────────────
 app.post("/support", async (req, res) => {
   try {
+    if (!checkSupportRate(getIP(req))) return res.status(429).json({ error:"Too many messages. Please wait a bit before sending another." });
     const { name, email, message, username, userId } = req.body;
     if (!message || !message.trim()) return res.status(400).json({ error: "Message required." });
 
@@ -1392,6 +1467,7 @@ app.post("/verify-placement", async (req, res) => {
   try {
     const { user_id, fingerprint_id, beat_id, spotify_id, youtube_id, platform, track_url, title, artist } = req.body;
     if (!user_id || (!fingerprint_id && !beat_id)) return res.status(400).json({ error: "Missing user_id and a beat reference (fingerprint_id or beat_id)." });
+    { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
     if (!title) return res.status(400).json({ error: "Missing track title." });
 
     // Locate the beat — by id if provided, otherwise by its permanent fingerprint
@@ -1446,6 +1522,7 @@ app.post("/remove-placement", async (req, res) => {
     if (!user_id || (!beat_id && !fingerprint_id && !title)) {
       return res.status(400).json({ error: "Missing user_id and a beat reference (beat_id, fingerprint_id, or title)." });
     }
+    { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
 
     // Locate the beat(s) for THIS user — by id, else fingerprint, else title.
     let beats = [];
@@ -1482,6 +1559,8 @@ app.post("/remove-placement", async (req, res) => {
 // ── Scan debug — tests every DB + storage operation ──────────
 // Hit GET /scan-debug?user_id=YOUR_USER_ID to see exactly what's failing
 app.get("/scan-debug", async (req, res) => {
+  const secret = process.env.ADMIN_SECRET || RESCAN_SECRET;
+  if ((req.headers["x-admin-secret"] || "") !== secret) return res.status(403).json({ error:"Forbidden" });
   const { user_id } = req.query;
   const results = {};
   try {
@@ -1572,6 +1651,7 @@ app.post("/scan", (req, res, next) => {
     if (!ACR_HOST||!ACR_KEY||!ACR_SECRET) return res.status(500).json({ error:"ACRCloud credentials not configured." });
     if (!req.file) return res.status(400).json({ error:"No file uploaded." });
     const { user_id } = req.body;
+    { const me = await authOr401(req, res); if (!me) return; if (user_id && me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
 
     // ── Step 1: Hash the file immediately — this is the universal beat identity ──
     const audioHash     = computeAudioHash(req.file.buffer);
@@ -1888,12 +1968,13 @@ app.post("/scan", (req, res, next) => {
 // ── Stream audio ──────────────────────────────────────────────
 app.get("/audio/:beat_id", async (req, res) => {
   try {
+    const me = await authOr401(req, res); if (!me) return;
     const beats = await sbSelect("beats", `id=eq.${req.params.beat_id}`);
     if (!Array.isArray(beats)||!beats[0]?.storage_path) return res.status(404).json({ error:"Beat not found." });
+    if (beats[0].user_id !== me.id) return res.status(403).json({ error:"Not your beat." });
     const r = await fetch(`${SUPABASE_URL}/storage/v1/object/beats/${beats[0].storage_path}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
     if (!r.ok) return res.status(404).json({ error:"Audio not found." });
     res.setHeader("Content-Type", r.headers.get("content-type")||"audio/mpeg");
-    res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Accept-Ranges", "bytes");
     r.body.pipe(res);
   } catch(err) { res.status(500).json({ error:err.message }); }
@@ -1901,25 +1982,34 @@ app.get("/audio/:beat_id", async (req, res) => {
 
 // ── Get beats ─────────────────────────────────────────────────
 app.get("/beats/:user_id", async (req, res) => {
-  try { const beats = await sbSelect("beats", `user_id=eq.${req.params.user_id}&order=uploaded_at.desc`); res.json(Array.isArray(beats)?beats:[]); }
+  try {
+    const me = await authOr401(req, res); if (!me) return;
+    if (me.id !== req.params.user_id) return res.status(403).json({ error:"Forbidden." });
+    const beats = await sbSelect("beats", `user_id=eq.${req.params.user_id}&order=uploaded_at.desc`); res.json(Array.isArray(beats)?beats:[]);
+  }
   catch(err) { res.status(500).json({ error:err.message }); }
 });
 
 // ── Delete beat ───────────────────────────────────────────────
 app.delete("/beats/:beat_id", async (req, res) => {
   try {
+    const me = await authOr401(req, res); if (!me) return;
     const beats = await sbSelect("beats", `id=eq.${req.params.beat_id}`);
-    if (Array.isArray(beats)&&beats.length>0&&beats[0].storage_path) await storageDelete(beats[0].storage_path);
-    res.json({ success: await sbDelete("beats", `id=eq.${req.params.beat_id}`) });
+    if (!Array.isArray(beats)||beats.length===0) return res.status(404).json({ error:"Beat not found." });
+    if (beats[0].user_id !== me.id) return res.status(403).json({ error:"Not your beat." });
+    if (beats[0].storage_path) await storageDelete(beats[0].storage_path);
+    res.json({ success: await sbDelete("beats", `id=eq.${req.params.beat_id}&user_id=eq.${me.id}`) });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
 // ── Get beat fingerprint ──────────────────────────────────────
 app.get("/beats/:beat_id/fingerprint", async (req, res) => {
   try {
+    const me = await authOr401(req, res); if (!me) return;
     const beats = await sbSelect("beats", `id=eq.${req.params.beat_id}`);
     const beat  = beats?.[0];
     if (!beat) return res.status(404).json({ error:"Beat not found." });
+    if (beat.user_id !== me.id) return res.status(403).json({ error:"Not your beat." });
     res.json({
       fingerprint_id: beat.fingerprint_id || null,
       audio_hash:     beat.audio_hash || null,
@@ -1939,6 +2029,7 @@ app.post("/subscribe", async (req, res) => {
     const { user_id, tier } = req.body;
     console.log("Subscribe request:", user_id, tier);
     if (!user_id) return res.status(400).json({ error:"Missing user_id." });
+    { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
     if (!STRIPE_KEY) return res.status(500).json({ error:"Stripe not configured." });
     const priceId = tier==="tier2" ? STRIPE_PRICE_T2 : STRIPE_PRICE_T1;
     console.log("Price ID:", priceId, "T1:", STRIPE_PRICE_T1, "T2:", STRIPE_PRICE_T2);
@@ -2016,7 +2107,10 @@ app.post("/subscribe", async (req, res) => {
 
 // ── Subscription status ───────────────────────────────────────
 app.get("/subscription/:user_id", async (req, res) => {
-  try { res.json(await getSubscriptionStatus(req.params.user_id)); }
+  try {
+    const me = await authOr401(req, res); if (!me) return;
+    if (me.id !== req.params.user_id) return res.status(403).json({ error:"Forbidden." });
+    res.json(await getSubscriptionStatus(req.params.user_id)); }
   catch(e) { res.status(500).json({ error:e.message }); }
 });
 
@@ -2025,6 +2119,7 @@ app.post("/cancel", async (req, res) => {
   try {
     const { user_id } = req.body;
     if (!user_id) return res.status(400).json({ error:"Missing user_id." });
+    { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
     const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
     const profile  = profiles?.[0];
     if (!profile?.stripe_customer_id) return res.status(400).json({ error:"No subscription found." });
@@ -2040,7 +2135,9 @@ app.post("/cancel", async (req, res) => {
 app.post("/webhook", async (req, res) => {
   try {
     const sig=req.headers["stripe-signature"], payload=req.body.toString();
-    if (STRIPE_WEBHOOK) {
+    if (!STRIPE_WEBHOOK) { console.error("Webhook rejected — STRIPE_WEBHOOK_SECRET not configured."); return res.status(503).json({ error:"Webhook verification not configured." }); }
+    if (!sig) return res.status(400).json({ error:"Missing signature" });
+    {
       const el=sig.split(",").reduce((a,e)=>{const p=e.split("=");a[p[0]]=p[1];return a;},{});
       const expected=crypto.createHmac("sha256",STRIPE_WEBHOOK).update(`${el.t}.${payload}`).digest("hex");
       if (expected!==el.v1) { console.error("Webhook sig mismatch"); return res.status(400).json({ error:"Invalid signature" }); }
@@ -2178,6 +2275,7 @@ app.post("/profile", async (req, res) => {
   try {
     const { user_id, username } = req.body;
     if (!user_id||!username) return res.status(400).json({ error:"Missing fields." });
+    { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
     const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
     if (Array.isArray(existing)&&existing.length>0) return res.status(400).json({ error:"Username already taken." });
     res.json(await sbInsert("profiles", { id:user_id, username }));
@@ -2192,6 +2290,7 @@ app.post("/profile/producer-since", async (req, res) => {
   try {
     const { user_id, producer_since } = req.body;
     if (!user_id || !producer_since) return res.status(400).json({ error:"Missing fields." });
+    { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
     await sbUpdate("profiles", `id=eq.${user_id}`, { producer_since: parseInt(producer_since) });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
