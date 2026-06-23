@@ -4,6 +4,7 @@ const cors       = require("cors");
 const crypto     = require("crypto");
 const fetch      = require("node-fetch");
 const FormData   = require("form-data");
+const { spawn }  = require("child_process");
 
 // ── Global crash guards ───────────────────────────────────────
 // Prevent ANY unhandled error or rejected promise from killing the process.
@@ -153,6 +154,57 @@ async function storageDelete(path) {
   const r = await fetch(`${SUPABASE_URL}/storage/v1/object/beats/${path}`, {
     method:"DELETE", headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
   }); return r.ok;
+}
+
+// ── Lossless → MP3 transcode ──────────────────────────────────
+// Uploads land in memory (multer). Lossless formats (WAV ~40MB, AIFF, FLAC) are
+// transcoded to 192kbps MP3 *before* anything is stored, so a maxed Tier 3
+// catalog can't blow up Supabase storage + egress. This is what keeps the
+// stored-file assumption (~5–6MB/beat) — and Tier 3's margin — intact.
+// Already-compressed uploads (mp3/m4a/aac/ogg) are left alone: no re-encode,
+// no generational quality loss. Identity is hashed from the ORIGINAL bytes
+// upstream, so transcoding never affects a beat's fingerprint.
+const MP3_BITRATE = process.env.TRANSCODE_BITRATE || "192k";
+const LOSSLESS_EXT  = /\.(wav|wave|aif|aiff|aifc|flac)$/i;
+const LOSSLESS_MIME = /^audio\/(x-)?(wav|wave|aiff|aif|flac)$/i;
+function isLossless(name, mime) {
+  return LOSSLESS_EXT.test(name || "") || LOSSLESS_MIME.test(mime || "");
+}
+// Transcode an audio buffer to MP3 via ffmpeg using stdio pipes (no temp files —
+// Railway's FS is ephemeral). Resolves to a Buffer; rejects on failure so the
+// caller can fall back to the original buffer rather than failing the upload.
+function transcodeToMp3(inputBuffer, bitrate = MP3_BITRATE) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", [
+      "-hide_banner", "-loglevel", "error",
+      "-i", "pipe:0",
+      "-vn",                       // drop any cover-art/video stream
+      "-map_metadata", "-1",       // strip tags — smaller, no PII leakage
+      "-ac", "2",
+      "-acodec", "libmp3lame",
+      "-b:a", bitrate,
+      "-f", "mp3",
+      "pipe:1",
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+
+    const out = [], errBuf = [];
+    let settled = false;
+    const finish = (fn, arg) => { if (!settled) { settled = true; clearTimeout(killer); fn(arg); } };
+    // Hard ceiling so a pathological file can't hang the request thread.
+    const killer = setTimeout(() => { try { ff.kill("SIGKILL"); } catch(_){} finish(reject, new Error("transcode timeout")); }, 90_000);
+
+    ff.stdout.on("data", d => out.push(d));
+    ff.stderr.on("data", d => errBuf.push(d));
+    ff.on("error", err => finish(reject, err)); // e.g. ffmpeg not on PATH
+    ff.on("close", code => {
+      if (code === 0 && out.length) return finish(resolve, Buffer.concat(out));
+      finish(reject, new Error("ffmpeg exited " + code + ": " + Buffer.concat(errBuf).toString().slice(0, 400)));
+    });
+
+    ff.stdin.on("error", () => {}); // swallow EPIPE if ffmpeg dies early
+    ff.stdin.write(inputBuffer);
+    ff.stdin.end();
+  });
 }
 
 // ── Audio segment slicer ──────────────────────────────────────
@@ -1515,7 +1567,25 @@ app.post("/scan", (req, res, next) => {
     const normalizedMime = req.file.mimetype === "video/mp4" ? "audio/mp4" : req.file.mimetype;
     req.file.mimetype = normalizedMime;
 
-    console.log(`SCAN START — user=${user_id} file="${req.file.originalname}" size=${req.file.size} mime=${normalizedMime} fp=${fingerprintId}`);
+    // ── Transcode lossless uploads → MP3 (after hashing, before any storage) ──
+    // Fingerprint identity above is already locked to the original bytes. From
+    // here down — knowledge-base path AND main path — we work with the MP3 so
+    // nothing oversized ever reaches Supabase. On failure we keep the original.
+    if (isLossless(req.file.originalname, normalizedMime)) {
+      const beforeKB = (req.file.size / 1024).toFixed(0);
+      try {
+        const mp3 = await transcodeToMp3(req.file.buffer);
+        req.file.buffer       = mp3;
+        req.file.size         = mp3.length;
+        req.file.mimetype     = "audio/mpeg";
+        req.file.originalname = req.file.originalname.replace(LOSSLESS_EXT, "") + ".mp3";
+        console.log(`TRANSCODE OK — ${beforeKB}KB → ${(mp3.length/1024).toFixed(0)}KB (${MP3_BITRATE} mp3) "${req.file.originalname}"`);
+      } catch (txErr) {
+        console.error("TRANSCODE FAILED (non-fatal — storing original):", txErr.message);
+      }
+    }
+
+    console.log(`SCAN START — user=${user_id} file="${req.file.originalname}" size=${req.file.size} mime=${req.file.mimetype} fp=${fingerprintId}`);
 
     // ── Step 2: Knowledge base lookup — runs for EVERY scan, EVERY user ──────────
     // This is the core of the learning system. Checks the permanent
@@ -1594,11 +1664,14 @@ app.post("/scan", (req, res, next) => {
       if (!status.hasAccess) { console.log(`SCAN PATH: no access`); return res.status(403).json({ error: status.pastDue ? "Your payment is past due. Please update billing to continue scanning." : "Your free trial has ended. Subscribe to continue scanning." }); }
       if (status.submissionLimit!==null && status.submissionsUsed>=status.submissionLimit) { console.log(`SCAN PATH: limit reached`); return res.status(403).json({ error:`Submission limit reached (${status.submissionsUsed}/${status.submissionLimit}). Upgrade to scan more beats.` }); }
 
-      const DAILY_CAP = 50;
-      const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-      const todayBeats = await sbSelect("beats", `user_id=eq.${user_id}&created_at=gte.${todayStart.toISOString()}`);
-      if (Array.isArray(todayBeats) && todayBeats.length >= DAILY_CAP) {
-        return res.status(429).json({ error:`Daily limit of ${DAILY_CAP} uploads reached. Come back tomorrow.` });
+      // Daily upload cap — Tier 3 ($39.99 studios/catalogs) is exempt (no cap).
+      if (status.tier !== "tier3") {
+        const DAILY_CAP = 50;
+        const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+        const todayBeats = await sbSelect("beats", `user_id=eq.${user_id}&created_at=gte.${todayStart.toISOString()}`);
+        if (Array.isArray(todayBeats) && todayBeats.length >= DAILY_CAP) {
+          return res.status(429).json({ error:`Daily limit of ${DAILY_CAP} uploads reached. Come back tomorrow.` });
+        }
       }
 
       const existing = await sbSelect("beats", `user_id=eq.${user_id}&fingerprint_id=eq.${encodeURIComponent(fingerprintId)}`);
