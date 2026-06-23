@@ -6,6 +6,23 @@ const fetch      = require("node-fetch");
 const FormData   = require("form-data");
 const { spawn }  = require("child_process");
 
+// ── ffmpeg binary resolution ──────────────────────────────────
+// Prefer the bundled ffmpeg-static binary so transcoding NEVER depends on the
+// Railway image shipping ffmpeg on PATH. Falls back to a PATH "ffmpeg" if the
+// package isn't installed. (Install once: `npm install ffmpeg-static`.)
+let FFMPEG_BIN = "ffmpeg";
+try { const s = require("ffmpeg-static"); if (s) FFMPEG_BIN = s; } catch (_) {}
+
+// Boot probe — log loudly whether transcoding is actually available, so a missing
+// binary shows up in Railway logs on deploy instead of silently storing raw WAVs.
+(() => {
+  try {
+    const probe = spawn(FFMPEG_BIN, ["-version"]);
+    probe.on("error", e => console.error(`⚠️  FFMPEG UNAVAILABLE ("${FFMPEG_BIN}") — lossless uploads will be STORED UNCONVERTED. ${e.message}`));
+    probe.stdout.once("data", d => console.log(`✓ ffmpeg ready (${FFMPEG_BIN}): ${d.toString().split("\n")[0]}`));
+  } catch (e) { console.error("ffmpeg boot probe failed:", e.message); }
+})();
+
 // ── Global crash guards ───────────────────────────────────────
 // Prevent ANY unhandled error or rejected promise from killing the process.
 // Railway will restart the container on crash, but that causes downtime.
@@ -173,7 +190,7 @@ function isLossless(name, mime) {
 // caller can fall back to the original buffer rather than failing the upload.
 function transcodeToMp3(inputBuffer, bitrate = MP3_BITRATE) {
   return new Promise((resolve, reject) => {
-    const ff = spawn("ffmpeg", [
+    const ff = spawn(FFMPEG_BIN, [
       "-hide_banner", "-loglevel", "error",
       "-i", "pipe:0",
       "-vn",                       // drop any cover-art/video stream
