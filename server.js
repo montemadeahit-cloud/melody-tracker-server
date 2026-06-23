@@ -1636,6 +1636,7 @@ app.post("/scan", (req, res, next) => {
     if (!req.file) return res.status(400).json({ error:"No file uploaded." });
     const { user_id } = req.body;
     { const me = await authOr401(req, res); if (!me) return; if (user_id && me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
+    let beatSaved = false, savedBeatId = null;
 
     // ── Step 1: Hash the file immediately — this is the universal beat identity ──
     const audioHash     = computeAudioHash(req.file.buffer);
@@ -1883,32 +1884,44 @@ app.post("/scan", (req, res, next) => {
           console.error("Storage upload failed (non-fatal — beat will still be saved):", uploadErr.message);
         }
 
-        // ── Beat DB insert — critical step ──────────
-        let insertedBeat = null;
+        // ── Beat DB insert — must always persist ──────────
+        // Split into CORE fields (must exist) and ENRICHMENT (bpm/key/duration —
+        // optional columns that may not exist in every schema). If the full insert
+        // fails (e.g. a missing optional column), we retry with core fields only so
+        // the beat ALWAYS lands in the library. A refresh must never lose a beat.
+        let insertedBeat = null, saveError = null;
+        const coreRow = {
+          user_id,
+          filename:       req.file.originalname,
+          storage_path:   uploadedPath,
+          status:         "monitoring",
+          last_scanned:   new Date().toISOString(),
+          last_result:    title,
+          last_artist:    artist || null,
+          spotify_id:     spotifyId || null,
+          youtube_id:     youtubeId || null,
+          uploaded_at:    new Date().toISOString(),
+          fingerprint_id: fingerprintId,
+          audio_hash:     audioHash,
+        };
+        const enrichment = { bpm: bpm || null, audio_key: audioKey || null, duration_ms: durationMs || null };
         try {
           console.log(`SCAN INSERT: attempting beats insert for user=${user_id} file="${req.file.originalname}"`);
-          const insertResult = await sbInsert("beats", {
-            user_id,
-            filename:       req.file.originalname,
-            storage_path:   uploadedPath,   // null if upload failed — rescan will skip it
-            status:         "monitoring",
-            last_scanned:   new Date().toISOString(),
-            last_result:    title,
-            last_artist:    artist || null,
-            spotify_id:     spotifyId || null,
-            youtube_id:     youtubeId || null,
-            uploaded_at:    new Date().toISOString(),
-            fingerprint_id: fingerprintId,
-            audio_hash:     audioHash,
-            bpm:            bpm || null,
-            audio_key:      audioKey || null,
-            duration_ms:    durationMs || null,
-          });
+          const insertResult = await sbInsert("beats", { ...coreRow, ...enrichment });
           insertedBeat = Array.isArray(insertResult) ? insertResult[0] : insertResult;
-          console.log(`Beat saved to DB: ${insertedBeat?.id || "(no id returned)"} — "${req.file.originalname}" user=${user_id}`);
         } catch(insertErr) {
-          console.error("CRITICAL: Beat DB insert failed:", insertErr.message, "user=", user_id, "file=", req.file.originalname);
+          console.error("Beat insert (with enrichment) failed — retrying core-only:", insertErr.message);
+          try {
+            const insertResult = await sbInsert("beats", coreRow);
+            insertedBeat = Array.isArray(insertResult) ? insertResult[0] : insertResult;
+            // Patch enrichment separately; never let it fail the save.
+            if (insertedBeat?.id) { try { await sbUpdate("beats", `id=eq.${insertedBeat.id}`, enrichment); } catch(_) {} }
+          } catch(retryErr) {
+            saveError = retryErr.message;
+            console.error("CRITICAL: Beat DB insert FAILED after retry:", retryErr.message, "user=", user_id, "file=", req.file.originalname);
+          }
         }
+        if (insertedBeat?.id) { beatSaved = true; savedBeatId = insertedBeat.id; console.log(`Beat saved to DB: ${insertedBeat.id} — "${req.file.originalname}" user=${user_id}`); }
 
         // Append to fingerprint log on profile (non-fatal)
         try {
@@ -1944,8 +1957,8 @@ app.post("/scan", (req, res, next) => {
       } catch(dbErr) { console.error("Post-scan DB error (non-fatal):", dbErr.message); }
     }
 
-    // Return ACR data with fingerprint ID appended so frontend can display it
-    res.json({ ...acrData, fingerprint_id: fingerprintId, bpm, audio_key: audioKey });
+    // Return ACR data with fingerprint ID + whether the beat persisted to the library
+    res.json({ ...acrData, fingerprint_id: fingerprintId, bpm, audio_key: audioKey, saved: beatSaved, beat_id: savedBeatId });
   } catch(err) { console.error("Scan error:",err.message); res.status(500).json({ error:"Scan failed: "+err.message }); }
 });
 
