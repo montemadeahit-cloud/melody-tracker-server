@@ -582,63 +582,74 @@ async function sendEmail(to, subject, html) {
   } catch(e) { console.error("Email error:",e.message); }
 }
 
+// ── Email design system ───────────────────────────────────────
+// Built to survive Gmail/Outlook (which strip SVG, web fonts, and <style>):
+// table layout, inline styles, HTML "bar" logo instead of SVG, gradients with
+// solid bgcolor fallbacks. Mirrors the site: black canvas, brand red, silver logo.
+const EM = {
+  bg:"#07080d", card:"#0f1015", card2:"#15161d",
+  border:"rgba(255,255,255,0.08)", border2:"rgba(255,255,255,0.12)",
+  text:"#ffffff", text2:"rgba(255,255,255,0.72)", text3:"rgba(255,255,255,0.46)",
+  red:"#ff4d6d", green:"#34e89e",
+  font:"-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif",
+};
+function emailLogoBars() {
+  // 5 waveform bars, bottom-aligned, silver gradient L→R — matches the app logo
+  const bars=[[14,"#ffffff"],[20,"#ffffff"],[26,"#eef0ff"],[21,"#dfe3f2"],[13,"#b8bdd6"]];
+  return `<table cellpadding="0" cellspacing="0" role="presentation" style="display:inline-block;vertical-align:middle;"><tr>${bars.map(b=>`<td valign="bottom" style="padding-right:3px;"><div style="width:5px;height:${b[0]}px;background:${b[1]};border-radius:3px;font-size:0;line-height:0;">&nbsp;</div></td>`).join("")}</tr></table>`;
+}
+function emailButton(href,label,accent){
+  const bg=accent?EM.red:"#ffffff";
+  const grad=accent?"linear-gradient(135deg,#ff5d7a 0%,#ff3b5e 100%)":"#ffffff";
+  const color=accent?"#ffffff":"#0a0a12";
+  return `<table cellpadding="0" cellspacing="0" role="presentation"><tr><td align="center" bgcolor="${bg}" style="border-radius:11px;background:${grad};"><a href="${href}" style="display:inline-block;padding:14px 30px;font-family:${EM.font};font-size:14px;font-weight:700;color:${color};text-decoration:none;letter-spacing:.02em;border-radius:11px;">${label}</a></td></tr></table>`;
+}
+function emailEyebrow(text){ return `<div style="font-size:11px;font-weight:700;color:${EM.red};letter-spacing:.16em;text-transform:uppercase;margin-bottom:13px;font-family:${EM.font};">${text}</div>`; }
+function emailH1(text){ return `<div style="font-size:26px;font-weight:800;color:${EM.text};letter-spacing:-.5px;line-height:1.2;margin-bottom:14px;font-family:${EM.font};">${text}</div>`; }
+
 function baseEmail(content) {
-  // Waveform bars as inline SVG (matches the app logo exactly)
-  const logoSvg = `<svg width="20" height="20" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:inline-block;vertical-align:middle;margin-right:8px;"><rect x="0" y="25" width="8" height="31" rx="4" fill="#FFFFFF"/><rect x="11" y="17" width="8" height="39" rx="4" fill="#FFFFFF"/><rect x="22" y="7" width="8" height="49" rx="4" fill="#FFFFFF"/><rect x="33" y="14" width="8" height="42" rx="4" fill="#eeeae2"/><rect x="44" y="24" width="8" height="32" rx="4" fill="#eeeae2"/></svg>`;
   return `<!DOCTYPE html>
-<html lang="en">
-<head>
+<html lang="en"><head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <meta name="color-scheme" content="dark"/>
   <title>TrackMyPlacements</title>
 </head>
-<body style="margin:0;padding:0;background:#08080a;-webkit-text-size-adjust:100%;">
-<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#08080a;padding:32px 16px 48px;">
+<body style="margin:0;padding:0;background:${EM.bg};-webkit-text-size-adjust:100%;">
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:${EM.bg};padding:34px 16px 46px;">
   <tr><td align="center">
-    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:520px;">
-
-      <!-- Top accent line -->
-      <tr><td style="height:2px;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,#ffffff 40%,#ffffff 60%,rgba(255,255,255,0) 100%);border-radius:1px;font-size:0;">&nbsp;</td></tr>
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:540px;">
 
       <!-- Card -->
-      <tr><td style="background:linear-gradient(180deg,#161616 0%,#0b0b0b 100%);border:1px solid rgba(255,255,255,0.09);border-top:1px solid rgba(255,255,255,0.24);border-radius:18px;overflow:hidden;">
-
-        <!-- Header -->
+      <tr><td style="background:${EM.card};border:1px solid ${EM.border};border-radius:20px;overflow:hidden;">
         <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
-          <tr>
-            <td style="padding:28px 32px 24px;border-bottom:1px solid rgba(255,255,255,0.07);">
-              <table cellpadding="0" cellspacing="0" role="presentation">
-                <tr>
-                  <td style="vertical-align:middle;padding-right:8px;">${logoSvg}</td>
-                  <td style="vertical-align:middle;">
-                    <span style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:15px;font-weight:700;color:#eeeae2;letter-spacing:-.2px;">TrackMy<span style="color:#ffffff;">Placements</span></span>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <!-- Content -->
-          <tr>
-            <td style="padding:28px 32px 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;">
-              ${content}
-            </td>
-          </tr>
-        </table>
 
+          <!-- Brand accent strip -->
+          <tr><td height="4" bgcolor="${EM.red}" style="height:4px;font-size:0;line-height:0;background:linear-gradient(90deg,#ff4d6d 0%,#ff8a9b 50%,#ff4d6d 100%);">&nbsp;</td></tr>
+
+          <!-- Header -->
+          <tr><td style="padding:26px 32px 22px;border-bottom:1px solid ${EM.border2};">
+            <table cellpadding="0" cellspacing="0" role="presentation"><tr>
+              <td style="vertical-align:middle;padding-right:11px;">${emailLogoBars()}</td>
+              <td style="vertical-align:middle;"><span style="font-family:${EM.font};font-size:16px;font-weight:700;color:${EM.text};letter-spacing:-.3px;">TrackMy<span style="color:${EM.red};">Placements</span></span></td>
+            </tr></table>
+          </td></tr>
+
+          <!-- Content -->
+          <tr><td style="padding:30px 32px 34px;font-family:${EM.font};">${content}</td></tr>
+
+        </table>
       </td></tr>
 
       <!-- Footer -->
-      <tr><td style="padding:20px 4px 0;">
-        <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
-          <tr>
-            <td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:11px;color:rgba(255,255,255,0.3);line-height:1.7;">
-              <a href="${APP_URL}" style="color:rgba(255,255,255,0.45);text-decoration:none;font-weight:600;letter-spacing:.01em;">trackmyplacements.com</a>
-              <span style="color:rgba(255,255,255,0.18);margin:0 8px;">·</span>
-              <span style="color:rgba(255,255,255,0.25);">Placement Location Engine</span>
-            </td>
-          </tr>
-        </table>
+      <tr><td style="padding:22px 6px 0;">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation"><tr>
+          <td style="font-family:${EM.font};font-size:11px;color:${EM.text3};line-height:1.7;">
+            <a href="${APP_URL}" style="color:rgba(255,255,255,0.6);text-decoration:none;font-weight:600;">trackmyplacements.com</a>
+            <span style="color:rgba(255,255,255,0.25);margin:0 8px;">·</span>
+            <span style="color:rgba(255,255,255,0.4);">Placement Location Engine</span>
+          </td>
+        </tr></table>
       </td></tr>
 
     </table>
@@ -649,78 +660,65 @@ function baseEmail(content) {
 
 function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
   const link = spotifyId ? `https://open.spotify.com/track/${spotifyId}` : youtubeId ? `https://youtube.com/watch?v=${youtubeId}` : null;
-  const platformLabel = spotifyId ? "Listen on Spotify" : youtubeId ? "Watch on YouTube" : null;
-  const platformBg = "#ffffff";
-  const platformColor = "#050508";
+  const platformLabel = spotifyId ? "Listen on Spotify ↗" : youtubeId ? "Watch on YouTube ↗" : null;
   return baseEmail(`
-    <!-- Label -->
-    <div style="display:inline-block;padding:4px 12px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.22);border-radius:999px;margin-bottom:18px;">
-      <span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:.04em;">● Placement found</span>
-    </div>
+    ${emailEyebrow("● Placement detected")}
+    ${emailH1("Your beat just landed.")}
+    <p style="font-size:14.5px;color:${EM.text2};line-height:1.7;margin:0 0 22px;font-family:${EM.font};">We matched one of your beats to a track that just surfaced on a major platform.</p>
 
-    <!-- Track info card -->
-    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-top:1px solid rgba(255,255,255,0.18);border-radius:14px;margin-bottom:24px;">
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:${EM.card2};border:1px solid ${EM.border2};border-radius:14px;margin-bottom:22px;">
       <tr><td style="padding:20px 22px;">
-        <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.4);letter-spacing:.13em;text-transform:uppercase;margin-bottom:10px;">Recognized as</div>
-        <div style="font-size:22px;font-weight:800;color:#ffffff;letter-spacing:-.4px;line-height:1.2;margin-bottom:5px;">${title}</div>
-        <div style="font-size:13px;color:rgba(238,234,226,0.5);">${artist || "Unknown artist"}</div>
+        <div style="font-size:10px;font-weight:700;color:${EM.red};letter-spacing:.14em;text-transform:uppercase;margin-bottom:9px;font-family:${EM.font};">Recognized as</div>
+        <div style="font-size:21px;font-weight:800;color:${EM.text};letter-spacing:-.4px;line-height:1.25;margin-bottom:5px;font-family:${EM.font};">${title}</div>
+        <div style="font-size:13px;color:${EM.text2};font-family:${EM.font};">${artist || "Unknown artist"}</div>
       </td></tr>
     </table>
 
-    <!-- Your beat label -->
-    <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.13em;margin-bottom:6px;">Your beat</div>
-    <div style="font-size:14px;font-weight:600;color:#eeeae2;margin-bottom:26px;line-height:1.4;">${filename}</div>
+    <div style="font-size:10px;font-weight:700;color:${EM.text3};text-transform:uppercase;letter-spacing:.14em;margin-bottom:6px;font-family:${EM.font};">Your beat</div>
+    <div style="font-size:14px;font-weight:600;color:${EM.text};margin-bottom:26px;line-height:1.4;font-family:${EM.font};">${filename}</div>
 
-    <!-- CTA button -->
-    ${link ? `<a href="${link}" style="display:inline-block;background:${platformBg};color:${platformColor};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-weight:700;font-size:13px;padding:12px 22px;border-radius:10px;text-decoration:none;letter-spacing:.03em;">${platformLabel} ↗</a>` : ""}
+    ${link ? emailButton(link, platformLabel, true) : ""}
 
-    <!-- Dashboard CTA -->
-    <p style="margin:22px 0 0;font-size:12px;color:rgba(255,255,255,0.38);line-height:1.75;">Head to your dashboard to verify this placement and add it to your catalog.</p>
+    <p style="margin:24px 0 0;font-size:12.5px;color:${EM.text3};line-height:1.7;font-family:${EM.font};">Open your dashboard to verify this placement and add it to your catalog.</p>
   `);
 }
 
 function passwordResetEmailHtml(resetUrl) {
   return baseEmail(`
-    <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.13em;text-transform:uppercase;margin-bottom:14px;">Account security</div>
-    <div style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-.4px;margin-bottom:14px;line-height:1.2;">Reset your password</div>
-    <p style="font-size:14px;color:rgba(238,234,226,0.55);line-height:1.8;margin:0 0 26px;">Click the button below to set a new password. This link expires in <span style="color:#ffffff;font-weight:600;">1 hour</span>.</p>
-    <a href="${resetUrl}" style="display:inline-block;background:#ffffff;color:#050508;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-weight:700;font-size:13px;padding:12px 22px;border-radius:10px;text-decoration:none;letter-spacing:.03em;">Set new password ↗</a>
-    <p style="margin:22px 0 0;font-size:12px;color:rgba(255,255,255,0.3);line-height:1.6;">Didn't request this? You can safely ignore this email — your account is unchanged.</p>
+    ${emailEyebrow("Account security")}
+    ${emailH1("Reset your password")}
+    <p style="font-size:14.5px;color:${EM.text2};line-height:1.7;margin:0 0 26px;font-family:${EM.font};">Tap below to set a new password. This link expires in <span style="color:${EM.text};font-weight:600;">1 hour</span>.</p>
+    ${emailButton(resetUrl, "Set new password ↗", true)}
+    <p style="margin:24px 0 0;font-size:12.5px;color:${EM.text3};line-height:1.6;font-family:${EM.font};">Didn't request this? Ignore this email — your account is unchanged.</p>
   `);
 }
 
 function welcomeEmailHtml(username) {
   const features = [
-    ["🪪", "Fingerprint registered", "A permanent, content-based ID assigned the moment you upload. It lives in our system forever."],
-    ["🔍", "Instant scan", "Your beat is checked immediately across Spotify, Apple Music, YouTube, TikTok & more."],
-    ["📡", "Rescans every 3 days", "We re-run your full library every 3 days. You'll get an email the moment something surfaces."],
-    ["✓",  "Verified catalog", "Confirmed placements are logged and shareable — your track record, backed by data."],
+    ["Fingerprint registered","A permanent, content-based ID assigned the moment you upload."],
+    ["Instant scan","Checked immediately across Spotify, Apple Music, YouTube, TikTok & more."],
+    ["Rescans every 3 days","We re-run your library every 3 days and email you the moment a placement surfaces."],
+    ["Verified catalog","Confirmed placements get logged and shared — your track record, backed by data."],
   ];
   return baseEmail(`
-    <!-- Greeting -->
-    <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.35);letter-spacing:.13em;text-transform:uppercase;margin-bottom:14px;">Welcome</div>
-    <div style="font-size:28px;font-weight:800;color:#ffffff;letter-spacing:-.5px;line-height:1.15;margin-bottom:16px;">You're in,<br/>@${username}.</div>
-    <p style="font-size:14px;color:rgba(238,234,226,0.5);line-height:1.85;margin:0 0 28px;">Right now your beats have no identifier on the internet — that's why placements are hard to track. Upload one and we assign it a unique ID, scan it immediately across all major platforms, and email you the moment it surfaces anywhere.</p>
+    ${emailEyebrow("Welcome")}
+    ${emailH1(`You're in, @${username}.`)}
+    <p style="font-size:14.5px;color:${EM.text2};line-height:1.75;margin:0 0 26px;font-family:${EM.font};">Your beats don't have an identifier on the internet yet — that's why placements slip by. Upload one and we fingerprint it, scan every major platform instantly, and email you the moment it surfaces.</p>
 
-    <!-- Divider -->
-    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:24px;">
-      <tr><td style="height:1px;background:rgba(255,255,255,0.1);font-size:0;">&nbsp;</td></tr>
-    </table>
-
-    <!-- Features -->
     <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:28px;">
-      ${features.map(([icon, label, body], i) => `
+      ${features.map(function(f,i){var pb=i<features.length-1?'16':'0';return `
       <tr>
-        <td style="width:32px;vertical-align:top;padding:0 0 18px;font-size:16px;color:#ffffff;">${icon}</td>
-        <td style="vertical-align:top;padding:0 0 18px 12px;${i < features.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.07);padding-bottom:18px;' : ''}">
-          <div style="font-size:13px;font-weight:700;color:#ffffff;margin-bottom:3px;">${label}</div>
-          <div style="font-size:12px;color:rgba(238,234,226,0.45);line-height:1.65;">${body}</div>
+        <td valign="top" style="width:20px;padding:0 0 ${pb}px;font-family:${EM.font};">
+          <div style="width:18px;height:18px;border-radius:50%;background:rgba(255,77,109,0.14);border:1px solid rgba(255,77,109,0.4);text-align:center;line-height:17px;color:${EM.red};font-size:11px;font-weight:800;">&#10003;</div>
         </td>
-      </tr>`).join("")}
+        <td valign="top" style="padding:0 0 ${pb}px 12px;font-family:${EM.font};">
+          <div style="font-size:13.5px;font-weight:700;color:${EM.text};margin-bottom:3px;">${f[0]}</div>
+          <div style="font-size:12.5px;color:${EM.text2};line-height:1.6;">${f[1]}</div>
+        </td>
+      </tr>`;}).join("")}
     </table>
 
-    <!-- CTA -->
-    <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#050508;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-weight:700;font-size:13px;padding:13px 26px;border-radius:10px;text-decoration:none;letter-spacing:.03em;">Scan your first beat ↗</a>
+    ${emailButton(APP_URL, "Scan your first beat ↗", true)}
   `);
 }
 
@@ -729,6 +727,17 @@ async function getSubscriptionStatus(user_id) {
   const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
   const profile  = profiles?.[0];
   if (!profile) return { hasAccess:false, trialActive:false, subscriptionActive:false, daysLeft:0, submissionsUsed:0, submissionLimit:25, emailMonitorsUsed:0, emailMonitorLimit:0 };
+
+  // Admin account — unlimited everything, flagged for the gold ADMIN pill.
+  if (profile.username && profile.username.toLowerCase()==="trackmyplacements") {
+    return {
+      hasAccess: true, admin: true, trialActive: false, subscriptionActive: true, pastDue: false,
+      daysLeft: 9999, trialEnd: new Date(Date.now() + 9999*24*60*60*1000).toISOString(),
+      tier: "admin", tierLabel: "ADMIN",
+      submissionsUsed: profile.submissions_used || 0, submissionLimit: null,
+      emailMonitorsUsed: profile.email_monitors_used || 0, emailMonitorLimit: null,
+    };
+  }
 
   // Comped accounts — always full Tier 2, never gated by trial/billing.
   if (profile.username && COMP_TIER2.has(profile.username.toLowerCase())) {
@@ -923,48 +932,23 @@ app.post("/auth/signup", async (req, res) => {
       sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(username)).catch(console.error);
       // Notify admin of new signup — bold, branded, high-contrast
       sendEmail("trackmyplacements@gmail.com", `New signup: @${username}`, baseEmail(`
-        <!-- Badge -->
-        <div style="display:inline-flex;align-items:center;gap:7px;padding:5px 13px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.14);border-radius:999px;margin-bottom:22px;">
-          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#ffffff;box-shadow:0 0 8px 2px rgba(255,255,255,0.45);"></span>
-          <span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.7);letter-spacing:.1em;text-transform:uppercase;">New signup</span>
-        </div>
-
-        <!-- Username — the hero line -->
-        <div style="font-size:36px;font-weight:800;color:#ffffff;letter-spacing:-.8px;line-height:1.1;margin-bottom:6px;">@${username}</div>
-
-        <!-- Divider -->
-        <div style="height:1px;background:rgba(255,255,255,0.08);margin:20px 0;"></div>
-
-        <!-- Details table -->
-        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:24px;">
+        ${emailEyebrow("● New signup")}
+        <div style="font-size:34px;font-weight:800;color:${EM.text};letter-spacing:-.7px;line-height:1.1;margin-bottom:22px;font-family:${EM.font};">@${username}</div>
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:26px;">
           <tr>
-            <td style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
-              <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.1em;">Email</span>
-            </td>
-            <td style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;">
-              <span style="font-size:13px;color:#eeeae2;font-weight:500;">${email}</span>
-            </td>
+            <td style="padding:11px 0;border-bottom:1px solid ${EM.border};"><span style="font-size:11px;font-weight:600;color:${EM.text3};text-transform:uppercase;letter-spacing:.1em;font-family:${EM.font};">Email</span></td>
+            <td style="padding:11px 0;border-bottom:1px solid ${EM.border};text-align:right;"><span style="font-size:13px;color:${EM.text};font-weight:500;font-family:${EM.font};">${email}</span></td>
           </tr>
           <tr>
-            <td style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
-              <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.1em;">Signed up</span>
-            </td>
-            <td style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;">
-              <span style="font-size:13px;color:#eeeae2;font-weight:500;">${new Date().toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/New_York"})} ET</span>
-            </td>
+            <td style="padding:11px 0;border-bottom:1px solid ${EM.border};"><span style="font-size:11px;font-weight:600;color:${EM.text3};text-transform:uppercase;letter-spacing:.1em;font-family:${EM.font};">Signed up</span></td>
+            <td style="padding:11px 0;border-bottom:1px solid ${EM.border};text-align:right;"><span style="font-size:13px;color:${EM.text};font-weight:500;font-family:${EM.font};">${new Date().toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit",timeZone:"America/New_York"})} ET</span></td>
           </tr>
           <tr>
-            <td style="padding:10px 0;">
-              <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.1em;">IP</span>
-            </td>
-            <td style="padding:10px 0;text-align:right;">
-              <span style="font-size:12px;color:rgba(238,234,226,0.45);font-family:monospace;">${ip}</span>
-            </td>
+            <td style="padding:11px 0;"><span style="font-size:11px;font-weight:600;color:${EM.text3};text-transform:uppercase;letter-spacing:.1em;font-family:${EM.font};">IP</span></td>
+            <td style="padding:11px 0;text-align:right;"><span style="font-size:12px;color:${EM.text2};font-family:monospace;">${ip}</span></td>
           </tr>
         </table>
-
-        <!-- CTA -->
-        <a href="${APP_URL}" style="display:inline-block;background:#ffffff;color:#050508;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;font-weight:700;font-size:13px;padding:12px 22px;border-radius:10px;text-decoration:none;letter-spacing:.03em;">View dashboard ↗</a>
+        ${emailButton(APP_URL, "View dashboard ↗", true)}
       `)).catch(console.error);
     }
 
@@ -2336,10 +2320,10 @@ app.post("/rescan", async (req, res) => {
       return res.json(rescanLog.lastResult);
     }
     console.log(`Rescanning ${beats.length} beats (3 engines × up to 6 slices each)...`);
-    let newMatches=0, scanned=0, skipped=0;
+    let newMatches=0, scanned=0, skipped=0, unmonitorable=0;
     for (const beat of beats) {
       try {
-        if (!beat.storage_path) { skipped++; continue; }
+        if (!beat.storage_path) { unmonitorable++; console.warn(`Beat ${beat.id} ("${beat.filename}") has no stored audio — cannot be rescanned. user=${beat.user_id}`); continue; }
         const status=await getSubscriptionStatus(beat.user_id);
         if (!status.hasAccess) { console.log(`Skipping ${beat.id} — no access`); skipped++; continue; }
         const buffer=await storageDownload(beat.storage_path);
@@ -2388,13 +2372,25 @@ app.post("/rescan", async (req, res) => {
           const spotifyId = bestRescan?.external_metadata?.spotify?.track?.id;
           const youtubeId = bestRescan?.external_metadata?.youtube?.vid;
           if (title!==beat.last_result) {
-            await sbUpdate("beats",`id=eq.${beat.id}`,{ status:"placed", last_scanned:new Date().toISOString(), last_result:title, last_artist:artist||null, spotify_id:spotifyId||null, youtube_id:youtubeId||null });
             const canEmail=RESEND_KEY&&(status.emailMonitorLimit===null||(status.emailMonitorLimit>0&&status.emailMonitorsUsed<status.emailMonitorLimit));
+            let emailed=false, attempted=false;
             if (canEmail) {
               const uRes=await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${beat.user_id}`,{headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`}});
               const uData=await uRes.json();
               if (uData?.email) {
-                await sendEmail(uData.email,`🎵 New placement found: "${beat.filename}"`,placementEmailHtml(beat.filename,title,artist,spotifyId,youtubeId));
+                attempted=true;
+                const sendRes=await sendEmail(uData.email,`🎵 New placement found: "${beat.filename}"`,placementEmailHtml(beat.filename,title,artist,spotifyId,youtubeId));
+                emailed=!!(sendRes && (sendRes.id || sendRes.data));
+                if (!emailed) console.error(`CRITICAL: placement email FAILED for beat ${beat.id} user ${beat.user_id} — keeping it in the monitoring pool to retry next rescan.`);
+              }
+            }
+            // Only "place" the beat (which removes it from the monitoring pool) once the
+            // user has actually been notified — or when we legitimately can't email
+            // (no key, or they're over their monthly alert cap). If an email was
+            // attempted and failed, leave it monitoring so the alert retries next run.
+            if (emailed || !attempted) {
+              await sbUpdate("beats",`id=eq.${beat.id}`,{ status:"placed", last_scanned:new Date().toISOString(), last_result:title, last_artist:artist||null, spotify_id:spotifyId||null, youtube_id:youtubeId||null });
+              if (emailed) {
                 newMatches++;
                 if (status.emailMonitorLimit!==null) {
                   const ps=await sbSelect("profiles",`id=eq.${beat.user_id}`);
@@ -2402,6 +2398,8 @@ app.post("/rescan", async (req, res) => {
                   if (p) await sbUpdate("profiles",`id=eq.${beat.user_id}`,{ email_monitors_used:(p.email_monitors_used||0)+1 });
                 }
               }
+            } else {
+              await sbUpdate("beats",`id=eq.${beat.id}`,{ last_scanned:new Date().toISOString() });
             }
           }
         } else { await sbUpdate("beats",`id=eq.${beat.id}`,{ last_scanned:new Date().toISOString() }); }
@@ -2409,7 +2407,7 @@ app.post("/rescan", async (req, res) => {
         await new Promise(r=>setTimeout(r,700));
       } catch(e) { console.error(`Rescan error beat ${beat.id}:`,e.message); skipped++; }
     }
-    const result = { message:"Rescan complete.", total:beats.length, scanned, skipped, newMatches };
+    const result = { message:"Rescan complete.", total:beats.length, scanned, skipped, unmonitorable, newMatches };
     rescanLog.lastRun = new Date().toISOString();
     rescanLog.lastResult = result;
     res.json(result);
