@@ -38,6 +38,7 @@ const RESCAN_SECRET    = process.env.RESCAN_SECRET || "rescan-secret";
 const STRIPE_KEY       = process.env.STRIPE_SECRET_KEY;
 const STRIPE_PRICE_T1  = process.env.STRIPE_PRICE_ID;
 const STRIPE_PRICE_T2  = process.env.STRIPE_PRICE_ID_TIER2;
+const STRIPE_PRICE_T3  = process.env.STRIPE_PRICE_ID_TIER3;
 const STRIPE_WEBHOOK   = process.env.STRIPE_WEBHOOK_SECRET;
 const APP_URL          = process.env.APP_URL || "https://trackmyplacements.com";
 
@@ -52,6 +53,7 @@ const LIMITS = {
   trial: { submissions: 25,   emailMonitors: 0,    label: "Free Trial" },
   tier1: { submissions: 50,   emailMonitors: 50,   label: "Tier 1"     },
   tier2: { submissions: 150,  emailMonitors: 150,  label: "Tier 2"     },
+  tier3: { submissions: 500,  emailMonitors: 500,  label: "Tier 3"     },
 };
 function getLimits(tier) { return LIMITS[tier] || LIMITS.trial; }
 
@@ -392,9 +394,10 @@ function sliceSubset(slices, n) {
 const RESCAN_SECONDARY_ENGINES = false;
 
 // RESCAN_ACR_SLICES — how many ACR slices each scheduled rescan sends per beat.
-// This is the single biggest lever on DAILY-rescan cost. ACR bills per slice, so:
-//   1 (default) → 1 slice/beat/rescan. ~$0.004/beat/day → ~$0.12/beat/month at daily.
-//                 To keep coverage high we ROTATE which slice is used each day, so
+// This is the single biggest lever on rescan cost. ACR bills per slice, so:
+//   1 (default) → 1 slice/beat/rescan. ~$0.004/beat/rescan. At an every-other-day
+//                 cron that's ~15 rescans/mo = ~$0.06/beat/month (≈$0.12 if daily).
+//                 To keep coverage high we ROTATE which slice is used each run, so
 //                 over a week every section of the track gets fingerprinted.
 //   2–3         → more recall per single rescan, proportionally more cost.
 // First scans are unaffected — they always sweep every slice.
@@ -566,7 +569,7 @@ function welcomeEmailHtml(username) {
   const features = [
     ["🪪", "Fingerprint registered", "A permanent, content-based ID assigned the moment you upload. It lives in our system forever."],
     ["🔍", "Instant scan", "Your beat is checked immediately across Spotify, Apple Music, YouTube, TikTok & more."],
-    ["📡", "Daily rescan", "We run your full library every day. You'll get an email the moment something surfaces."],
+    ["📡", "Rescans every other day", "We re-run your full library every 48 hours. You'll get an email the moment something surfaces."],
     ["✓",  "Verified catalog", "Confirmed placements are logged and shareable — your track record, backed by data."],
   ];
   return baseEmail(`
@@ -715,6 +718,7 @@ app.get("/", (req, res) => res.json({
   stripe:!!STRIPE_KEY,
   stripePriceT1:!!STRIPE_PRICE_T1,
   stripePriceT2:!!STRIPE_PRICE_T2,
+  stripePriceT3:!!STRIPE_PRICE_T3,
   stripeWebhook:!!STRIPE_WEBHOOK,
   resend:!!RESEND_KEY,
   shazam:!!RAPIDAPI_KEY,
@@ -1852,8 +1856,8 @@ app.post("/subscribe", async (req, res) => {
     console.log("Subscribe request:", user_id, tier);
     if (!user_id) return res.status(400).json({ error:"Missing user_id." });
     if (!STRIPE_KEY) return res.status(500).json({ error:"Stripe not configured." });
-    const priceId = tier==="tier2" ? STRIPE_PRICE_T2 : STRIPE_PRICE_T1;
-    console.log("Price ID:", priceId, "T1:", STRIPE_PRICE_T1, "T2:", STRIPE_PRICE_T2);
+    const priceId = tier==="tier3" ? STRIPE_PRICE_T3 : tier==="tier2" ? STRIPE_PRICE_T2 : STRIPE_PRICE_T1;
+    console.log("Price ID:", priceId, "T1:", STRIPE_PRICE_T1, "T2:", STRIPE_PRICE_T2, "T3:", STRIPE_PRICE_T3);
     if (!priceId) return res.status(500).json({ error:"Price ID not configured. Check STRIPE_PRICE_ID env var." });
 
     const uRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${user_id}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
@@ -1909,7 +1913,7 @@ app.post("/subscribe", async (req, res) => {
       checkoutBody["payment_method_collection"]              = "always";
       checkoutBody["subscription_data[trial_settings][end_behavior][missing_payment_method]"] = "cancel";
       // Record the tier they chose now so the trial shows the right plan before the webhook lands.
-      await sbUpdate("profiles", `id=eq.${user_id}`, { tier: tier==="tier2" ? "tier2" : "tier1" });
+      await sbUpdate("profiles", `id=eq.${user_id}`, { tier: (tier==="tier3"||tier==="tier2"||tier==="tier1") ? tier : "tier1" });
     }
     const session = await stripeRequest("/checkout/sessions","POST", checkoutBody);
     console.log("Session:", session.url, session.error);
@@ -1971,7 +1975,8 @@ app.post("/webhook", async (req, res) => {
       }
       // Detect tier from price ID if not in metadata
       const priceId = obj.items?.data?.[0]?.price?.id || obj.plan?.id;
-      if (priceId && priceId === STRIPE_PRICE_T2) tier = "tier2";
+      if (priceId && priceId === STRIPE_PRICE_T3) tier = "tier3";
+      else if (priceId && priceId === STRIPE_PRICE_T2) tier = "tier2";
       else if (priceId) tier = "tier1";
       return { userId, tier };
     }
