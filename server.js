@@ -391,9 +391,30 @@ function sliceSubset(slices, n) {
 //                     per-rescan metered spend for marginally more recall).
 const RESCAN_SECONDARY_ENGINES = false;
 
+// RESCAN_ACR_SLICES — how many ACR slices each scheduled rescan sends per beat.
+// This is the single biggest lever on DAILY-rescan cost. ACR bills per slice, so:
+//   1 (default) → 1 slice/beat/rescan. ~$0.004/beat/day → ~$0.12/beat/month at daily.
+//                 To keep coverage high we ROTATE which slice is used each day, so
+//                 over a week every section of the track gets fingerprinted.
+//   2–3         → more recall per single rescan, proportionally more cost.
+// First scans are unaffected — they always sweep every slice.
+const RESCAN_ACR_SLICES = 1;
+
+// Pick ACR slices for a rescan. For a single slice we rotate by day so coverage
+// builds across the week; for >1 we evenly sample (and always keep first + last).
+function rescanAcrSlices(slices) {
+  const n = Math.max(1, Math.min(RESCAN_ACR_SLICES, slices.length));
+  if (n >= slices.length) return slices;
+  if (n === 1) {
+    const day = Math.floor(Date.now() / 86400000); // days since epoch → rotates daily
+    return [slices[day % slices.length]];
+  }
+  return sliceSubset(slices, n);
+}
+
 async function scanAllEngines(buffer, filename, mimetype, rescan) {
   const slices    = getSlices(buffer, rescan);
-  const acrSlices = rescan ? sliceSubset(slices, 3) : slices;
+  const acrSlices = rescan ? rescanAcrSlices(slices) : slices;
   const bestSlice = pickBestSlice(slices);
 
   // On rescans, secondary engines are skipped by default (see RESCAN_SECONDARY_ENGINES).
@@ -1343,17 +1364,12 @@ app.post("/verify-placement", async (req, res) => {
   } catch (e) { console.error("verify-placement error:", e.message); res.status(500).json({ error: e.message }); }
 });
 
-// ── Remove a verified placement (persist the removal) ─────────────
-// The Verified tab is hydrated from the server's "placed" beats on every load,
-// and a scan can re-inject a placement from the permanent knowledge base. So a
-// removal that only touches localStorage reappears on refresh. This endpoint
-// makes the removal stick:
-//   1. Flips the matching beat(s) to status "removed" and clears the placement
-//      fields, so /beats no longer returns it as placed (gone from Verified) and
-//      the rescan cron (which selects status=monitoring) skips it.
-//   2. Deletes THIS user's rows from fingerprint_knowledge for that beat, so a
-//      future scan of the same file won't auto-re-flag it. Other users'
-//      verifications of the same fingerprint are left intact.
+// ── Remove a verified placement (hard delete — make it STAY gone) ──
+// The Verified tab re-hydrates from the server's "placed" beats on every load,
+// so a removal that only touches localStorage reappears on refresh. The only
+// thing that reliably sticks is removing the underlying beat record. This uses
+// the exact same delete path as the Library "remove" (which works), plus it
+// deletes this user's knowledge rows so a future scan can't re-inject it.
 app.post("/remove-placement", async (req, res) => {
   try {
     const { user_id, beat_id, fingerprint_id, title } = req.body;
@@ -1371,30 +1387,24 @@ app.post("/remove-placement", async (req, res) => {
       beats = await sbSelect("beats", `user_id=eq.${user_id}&last_result=eq.${encodeURIComponent(title)}`);
     }
     if (!Array.isArray(beats) || beats.length === 0) {
-      // Nothing server-side to change (e.g. an in-session item never persisted) —
-      // treat as success so the UI can clear it without erroring.
+      // Nothing server-side (e.g. an in-session item that never persisted) —
+      // report success so the UI can clear it without erroring.
       return res.json({ success: true, removed: 0 });
     }
 
     let removed = 0;
     for (const beat of beats) {
-      await sbUpdate("beats", `id=eq.${beat.id}`, {
-        status:       "removed",
-        last_result:  null,
-        last_artist:  null,
-        spotify_id:   null,
-        youtube_id:   null,
-        last_scanned: new Date().toISOString(),
-      });
-      removed++;
-      // Remove this user's knowledge rows for this fingerprint so a manual
-      // re-scan won't re-inject the placement we just removed.
+      // 1. Delete the stored audio (best-effort).
+      if (beat.storage_path) { try { await storageDelete(beat.storage_path); } catch(e) {} }
+      // 2. Delete this user's knowledge rows for this fingerprint so a re-scan
+      //    can't auto-re-inject the placement. Other users' rows are untouched.
       const fp = beat.fingerprint_id || fingerprint_id;
-      if (fp) {
-        await sbDelete("fingerprint_knowledge", `fingerprint_id=eq.${encodeURIComponent(fp)}&verified_by=eq.${user_id}`);
-      }
+      if (fp) { try { await sbDelete("fingerprint_knowledge", `fingerprint_id=eq.${encodeURIComponent(fp)}&verified_by=eq.${user_id}`); } catch(e) {} }
+      // 3. Delete the beat row itself — this is what makes it stay gone.
+      const ok = await sbDelete("beats", `id=eq.${beat.id}&user_id=eq.${user_id}`);
+      if (ok) removed++;
     }
-    console.log(`Placement removed: user=${user_id} beats=${removed} (${beat_id || fingerprint_id || title})`);
+    console.log(`Placement removed (hard delete): user=${user_id} beats=${removed} (${beat_id || fingerprint_id || title})`);
     res.json({ success: true, removed });
   } catch (e) { console.error("remove-placement error:", e.message); res.status(500).json({ error: e.message }); }
 });
@@ -2099,10 +2109,12 @@ app.post("/profile/producer-since", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Rescan (twice daily) ───────────────────────────────────────
+// ── Rescan (DAILY) ─────────────────────────────────────────────
 // Hit POST /rescan with header x-rescan-secret on a cron schedule.
-// Recommended: 0 6 * * * and 0 18 * * * (6am + 6pm UTC) for ~12h detection window.
-// Each call uses the full 3-engine fan-out (ACRCloud + AudD + Shazam).
+// For "daily monitoring", run once a day, e.g. 0 7 * * * (07:00 UTC).
+// Cost per beat per rescan = RESCAN_ACR_SLICES ACR calls (default 1, rotating),
+// ACR-only unless RESCAN_SECONDARY_ENGINES is on. Only beats uploaded within
+// RETIRE_DAYS are in the pool, so daily spend stays bounded as libraries grow.
 const rescanLog = { lastRun: null, lastResult: null };
 
 app.get("/rescan/status", (req, res) => {
@@ -2110,10 +2122,27 @@ app.get("/rescan/status", (req, res) => {
   res.json({ lastRun: rescanLog.lastRun, lastResult: rescanLog.lastResult });
 });
 
+// ── Auto-retire window ────────────────────────────────────────
+// Placements almost always surface within weeks of a release, but unmatched
+// beats sit in "monitoring" forever and get rescanned every single day — that
+// unbounded accumulation is what turns a daily rescan into a money pit. So we
+// only daily-rescan beats uploaded within the last RETIRE_DAYS. Older unmatched
+// beats stop being rescanned (they keep their record; they're just no longer in
+// the paid daily pool). This caps daily cost at roughly "uploads in the window".
+//   30 (default) → daily pool ≈ one month of a user's uploads. Set 0 to disable
+//                  (rescans the entire lifetime library — only do this with a
+//                  hard per-user library cap or you WILL lose money at scale).
+const RETIRE_DAYS = 30;
+
 app.post("/rescan", async (req, res) => {
   if (req.headers["x-rescan-secret"]!==RESCAN_SECRET) return res.status(401).json({ error:"Unauthorized" });
   try {
-    const beats = await sbSelect("beats","status=eq.monitoring&order=last_scanned.asc");
+    let beatQuery = "status=eq.monitoring&order=last_scanned.asc";
+    if (RETIRE_DAYS > 0) {
+      const cutoff = new Date(Date.now() - RETIRE_DAYS*24*60*60*1000).toISOString();
+      beatQuery += `&uploaded_at=gte.${cutoff}`;
+    }
+    const beats = await sbSelect("beats", beatQuery);
     if (!Array.isArray(beats)||beats.length===0) {
       rescanLog.lastRun = new Date().toISOString();
       rescanLog.lastResult = { message:"No beats to rescan.", count:0 };
