@@ -143,6 +143,13 @@ const checkLoginRate   = makeRateLimiter(12, 15*60*1000); // brute-force guard: 
 const checkForgotRate  = makeRateLimiter(5,  60*60*1000); // 5 / hour
 const checkSupportRate = makeRateLimiter(8,  60*60*1000); // 8 / hour
 
+// Rolling log of the most recent Stripe webhook events (in-memory, last 50).
+// Lets /admin/metrics surface whether webhooks are arriving and verifying — a
+// silently-misconfigured webhook secret is otherwise invisible until a customer
+// pays and never gets access.
+const webhookLog = [];
+function logWebhook(entry) { webhookLog.push(Object.assign({ t: new Date().toISOString() }, entry)); if (webhookLog.length > 50) webhookLog.shift(); }
+
 // Clear rate limit for an IP (debug). Locked behind an admin secret — was public.
 app.get("/admin/reset-ratelimit", (req, res) => {
   const secret = process.env.ADMIN_SECRET || RESCAN_SECRET;
@@ -209,6 +216,19 @@ async function sbDelete(table, filter) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
     method:"DELETE", headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
   }); return r.ok;
+}
+// Exact row count without transferring the rows — reads Content-Range from a
+// count=exact HEAD-style request (we ask for a single row to keep it cheap).
+async function sbCount(table, filter) {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter || ""}`, {
+      headers:{ "apikey":SUPABASE_SERVICE, "Authorization":`Bearer ${SUPABASE_SERVICE}`, "Prefer":"count=exact", "Range":"0-0" },
+    });
+    const cr = r.headers.get("content-range"); // "0-0/1234" or "*/1234"
+    if (!cr || !cr.includes("/")) return null;
+    const total = cr.split("/")[1];
+    return total === "*" ? null : parseInt(total, 10);
+  } catch (e) { return null; }
 }
 
 // ── Supabase Storage ──────────────────────────────────────────
@@ -345,19 +365,28 @@ function mergeAllResults(responses) {
     for (const m of (r?.metadata?.music || [])) {
       const key = normaliseTitle(m.title);
       if (!key) continue;
+      const eng = m._source || "acrcloud";
       const existing = musicMap.get(key);
-      // Keep highest score, but prefer the entry that has more DSP metadata
       if (!existing) {
-        musicMap.set(key, m);
+        musicMap.set(key, { ...m, _hits: 1, _engines: [eng] });
       } else {
+        // Accumulate corroboration on EVERY re-detection, independent of which
+        // entry's metadata "wins". _hits = how many slices/engines saw this track;
+        // _engines = the distinct engines that saw it. These are the real signal
+        // that separates a genuine placement (your beat runs through the whole song,
+        // so it matches many slices) from a one-off sample/loop collision.
+        const engines = existing._engines.indexOf(eng) === -1 ? existing._engines.concat([eng]) : existing._engines;
+        const hits    = (existing._hits || 1) + 1;
         const existingDsp = (existing.external_metadata?.spotify?.track?.id ? 1 : 0) + (existing.external_metadata?.youtube?.vid ? 1 : 0);
         const newDsp      = (m.external_metadata?.spotify?.track?.id ? 1 : 0) + (m.external_metadata?.youtube?.vid ? 1 : 0);
+        let base = existing;
         if ((m.score || 0) > (existing.score || 0) || newDsp > existingDsp) {
-          // Merge: take highest score but union DSP metadata
-          const merged = { ...existing, ...m, score: Math.max(m.score || 0, existing.score || 0) };
-          merged.external_metadata = { ...existing.external_metadata, ...m.external_metadata };
-          musicMap.set(key, merged);
+          base = { ...existing, ...m, score: Math.max(m.score || 0, existing.score || 0) };
+          base.external_metadata = { ...existing.external_metadata, ...m.external_metadata };
         }
+        base._hits = hits;
+        base._engines = engines;
+        musicMap.set(key, base);
       }
     }
     for (const m of (r?.metadata?.humming || [])) {
@@ -368,7 +397,19 @@ function mergeAllResults(responses) {
     }
   }
 
-  const music   = [...musicMap.values()].sort((a, b) => (b.score || 0) - (a.score || 0));
+  // Corroboration-weighted ranking. A track detected across multiple slices and/or
+  // engines beats a lone high-score hit: extra detections add +7 each, a second
+  // distinct engine adds +14. This lets the genuinely-placed track overcome a small
+  // score deficit against a single-slice false positive — without letting a weak,
+  // repeated noise match leapfrog a clean, dominant one.
+  function rankScore(m){
+    const hits = m._hits || 1;
+    const engines = (m._engines || []).length || 1;
+    return (m.score || 0) + (hits - 1) * 7 + (engines - 1) * 14;
+  }
+  const music = [...musicMap.values()]
+    .map(m => Object.assign({}, m, { _rank: rankScore(m), _corroborated: ((m._hits||1) >= 2 || (m._engines||[]).length >= 2) }))
+    .sort((a, b) => (b._rank || 0) - (a._rank || 0));
   const humming = [...hummingMap.values()].sort((a, b) => (b.score || 0) - (a.score || 0));
 
   return {
@@ -680,6 +721,17 @@ function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
     ${link ? emailButton(link, platformLabel, true) : ""}
 
     <p style="margin:24px 0 0;font-size:12.5px;color:${EM.text3};line-height:1.7;font-family:${EM.font};">Open your dashboard to verify this placement and add it to your catalog.</p>
+  `);
+}
+
+function trialEndingEmailHtml(username, tierLabel, price, endsWhen) {
+  return baseEmail(`
+    ${emailEyebrow("● Trial ending soon")}
+    ${emailH1("Your trial is almost up.")}
+    <p style="font-size:14.5px;color:${EM.text2};line-height:1.7;margin:0 0 22px;font-family:${EM.font};">Hey @${username} — a heads up that your free trial ends ${endsWhen}. After that your ${tierLabel} plan begins and your card is charged <span style="color:${EM.text};font-weight:600;">${price}/month</span>, then monthly until you cancel.</p>
+    <p style="font-size:14.5px;color:${EM.text2};line-height:1.7;margin:0 0 26px;font-family:${EM.font};">Want to keep monitoring? You don't need to do anything. Not ready? You can cancel anytime from your account before the trial ends and you won't be charged.</p>
+    ${emailButton(APP_URL, "Open your dashboard ↗", true)}
+    <p style="margin:24px 0 0;font-size:12.5px;color:${EM.text3};line-height:1.6;font-family:${EM.font};">Manage or cancel your plan anytime under Account. All payments are final and non-refundable.</p>
   `);
 }
 
@@ -2166,14 +2218,15 @@ app.post("/webhook", async (req, res) => {
         const a=Buffer.from(expected,"hex"), b=Buffer.from(el.v1||"","hex");
         sigOk = a.length===b.length && crypto.timingSafeEqual(a,b);
       } catch(_) { sigOk=false; }
-      if (!sigOk) { console.error("Webhook sig mismatch"); return res.status(400).json({ error:"Invalid signature" }); }
+      if (!sigOk) { console.error("Webhook sig mismatch"); logWebhook({ type:"(rejected)", ok:false, reason:"bad-signature" }); return res.status(400).json({ error:"Invalid signature" }); }
       // Reject events whose timestamp is outside a 5-minute window — blunts replay
       // of a captured, validly-signed payload.
       const ts=parseInt(el.t,10);
-      if (!ts || Math.abs(Math.floor(Date.now()/1000)-ts) > 300) { console.error("Webhook timestamp outside tolerance"); return res.status(400).json({ error:"Stale signature" }); }
+      if (!ts || Math.abs(Math.floor(Date.now()/1000)-ts) > 300) { console.error("Webhook timestamp outside tolerance"); logWebhook({ type:"(rejected)", ok:false, reason:"stale" }); return res.status(400).json({ error:"Stale signature" }); }
     }
     const event=JSON.parse(payload);
     console.log("Webhook:",event.type);
+    logWebhook({ type:event.type, ok:true });
 
     // Helper: resolve user_id and tier from any Stripe event object
     async function resolveUser(obj) {
@@ -2256,6 +2309,32 @@ app.post("/webhook", async (req, res) => {
       const s = event.data.object;
       const { userId } = await resolveUser(s);
       if (userId) { await sbUpdate("profiles",`id=eq.${userId}`,{ subscription_status:"cancelled", tier:"trial" }); console.log("Cancelled:",userId); }
+    }
+
+    // Fires ~3 days before a card-required trial converts to a paid charge.
+    // (Enable "customer.subscription.trial_will_end" on the webhook in the Stripe
+    // dashboard for this to arrive.) A clear pre-charge reminder is the single
+    // biggest lever against "forgot I signed up" chargebacks.
+    if (event.type==="customer.subscription.trial_will_end") {
+      const s = event.data.object;
+      const { userId, tier } = await resolveUser(s);
+      if (userId && RESEND_KEY) {
+        try {
+          const limits    = getLimits(tier || "tier1");
+          const price     = (tier === "tier2") ? "$19.99" : "$9.99";
+          const endsWhen  = s.trial_end
+            ? "on " + new Date(s.trial_end*1000).toLocaleDateString("en-US",{ month:"long", day:"numeric" })
+            : "in a few days";
+          const ps  = await sbSelect("profiles", `id=eq.${userId}`);
+          const uname = ps?.[0]?.username || "there";
+          const uRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${userId}`, { headers:{ "apikey":SUPABASE_SERVICE, "Authorization":`Bearer ${SUPABASE_SERVICE}` } });
+          const uData = await uRes.json();
+          if (uData?.email) {
+            await sendEmail(uData.email, "Your TrackMyPlacements trial ends soon", trialEndingEmailHtml(uname, limits.label, price, endsWhen));
+            console.log("Trial-ending reminder sent:", userId);
+          }
+        } catch(e) { console.error("trial_will_end email error:", e.message); }
+      }
     }
 
     if (event.type==="invoice.payment_failed") {
@@ -2440,6 +2519,45 @@ app.post("/admin/set-tier", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Admin: at-a-glance health (detection + billing) ───────────────────────────
+// One endpoint to answer the two questions that actually matter post-launch:
+// (1) is detection delivering — match rate and placed counts; (2) is billing
+// healthy — active subs and whether Stripe webhooks are arriving and verifying.
+// GET with header x-admin-secret.
+app.get("/admin/metrics", async (req, res) => {
+  const secret = process.env.ADMIN_SECRET || RESCAN_SECRET;
+  if ((req.headers["x-admin-secret"] || "") !== secret) return res.status(403).json({ error:"Forbidden" });
+  try {
+    const [profilesTotal, beatsTotal, placed, monitoring, active, trialing, pastDue, t1, t2] = await Promise.all([
+      sbCount("profiles", ""),
+      sbCount("beats", ""),
+      sbCount("beats", "status=eq.placed"),
+      sbCount("beats", "status=eq.monitoring"),
+      sbCount("profiles", "subscription_status=eq.active"),
+      sbCount("profiles", "subscription_status=eq.trialing"),
+      sbCount("profiles", "subscription_status=eq.past_due"),
+      sbCount("profiles", "subscription_status=eq.active&tier=eq.tier1"),
+      sbCount("profiles", "subscription_status=eq.active&tier=eq.tier2"),
+    ]);
+    const matchRatePct = (beatsTotal && placed != null) ? +(100 * placed / beatsTotal).toFixed(1) : null;
+    const lastWebhook  = webhookLog.length ? webhookLog[webhookLog.length - 1] : null;
+    res.json({
+      generatedAt: new Date().toISOString(),
+      detection: { totalBeats: beatsTotal, placed, monitoring, matchRatePct },
+      billing: {
+        users: profilesTotal,
+        activeSubs: active, trialing, pastDue,
+        byTier: { tier1: t1, tier2: t2 },
+        webhooksSeen: webhookLog.length,
+        lastWebhook,
+        recentWebhooks: webhookLog.slice(-15).reverse(),
+      },
+      rescan: rescanLog,
+      engines: { acrcloud: !!ACR_KEY, audd: !!AUDD_KEY, shazam: !!RAPIDAPI_KEY, resend: !!RESEND_KEY, stripeWebhook: !!STRIPE_WEBHOOK },
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Rescan (every 3 days) ──────────────────────────────────────
 // Hit POST /rescan with header x-rescan-secret on a cron schedule.
 // For 3-day monitoring, run e.g. 0 7 */3 * * (07:00 UTC, every 3rd day).
@@ -2465,6 +2583,14 @@ app.get("/rescan/status", (req, res) => {
 //                  hard per-user library cap or you WILL lose money at scale).
 const RETIRE_DAYS = 30;
 
+// Hard cap on how many beats a single rescan run will process. The loop staggers
+// ~700ms/beat, so without a ceiling a large library could make one run outlast the
+// gap to the next cron tick — runs would pile up and stall. Oldest-scanned beats are
+// processed first (order=last_scanned.asc), so nothing starves: whatever doesn't fit
+// this run is first in line next run. Raise as the library grows; at 800/run and a
+// 3-day cadence that's headroom for ~8k actively-monitored beats.
+const MAX_BEATS_PER_RUN = parseInt(process.env.MAX_BEATS_PER_RUN || "800", 10);
+
 app.post("/rescan", async (req, res) => {
   if (req.headers["x-rescan-secret"]!==RESCAN_SECRET) return res.status(401).json({ error:"Unauthorized" });
   try {
@@ -2473,6 +2599,7 @@ app.post("/rescan", async (req, res) => {
       const cutoff = new Date(Date.now() - RETIRE_DAYS*24*60*60*1000).toISOString();
       beatQuery += `&uploaded_at=gte.${cutoff}`;
     }
+    if (MAX_BEATS_PER_RUN > 0) beatQuery += `&limit=${MAX_BEATS_PER_RUN}`;
     const beats = await sbSelect("beats", beatQuery);
     if (!Array.isArray(beats)||beats.length===0) {
       rescanLog.lastRun = new Date().toISOString();
@@ -2510,6 +2637,10 @@ app.post("/rescan", async (req, res) => {
           if (!m) return false;
           if ((m.score||100) < 99) return false;   // high-confidence only
           if (!hasDspIdRescan(m)) return false;     // must have a verifiable DSP link
+          // Must be corroborated — detected on 2+ slices or by 2+ engines. This is
+          // what stops a lone single-slice sample/loop collision from silently being
+          // written as a "placed" placement during an unattended rescan.
+          if (m._corroborated === false) return false;
           const t = (m.title||"").toLowerCase().trim();
           const badT = ["unknown","untitled","","no title","n/a","na","null","undefined"];
           if (badT.includes(t)||t.includes("untitled")) return false;
