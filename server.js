@@ -1634,8 +1634,8 @@ app.post("/scan", (req, res, next) => {
   try {
     if (!ACR_HOST||!ACR_KEY||!ACR_SECRET) return res.status(500).json({ error:"ACRCloud credentials not configured." });
     if (!req.file) return res.status(400).json({ error:"No file uploaded." });
-    const { user_id } = req.body;
-    { const me = await authOr401(req, res); if (!me) return; if (user_id && me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
+    let { user_id } = req.body;
+    { const me = await authOr401(req, res); if (!me) return; if (user_id && me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); user_id = user_id || me.id; }
     let beatSaved = false, savedBeatId = null;
 
     // ── Step 1: Hash the file immediately — this is the universal beat identity ──
@@ -1666,6 +1666,21 @@ app.post("/scan", (req, res, next) => {
 
     console.log(`SCAN START — user=${user_id} file="${req.file.originalname}" size=${req.file.size} mime=${req.file.mimetype} fp=${fingerprintId}`);
 
+    // ── Access gate — runs BEFORE the knowledge-base lookup ─────────────────────
+    // The knowledge-base branch below can register beats + increment usage, so the
+    // access check has to happen first. Otherwise a lapsed/cancelled/over-limit
+    // account could keep registering known-fingerprint beats for free via the KB
+    // path (which used to sit ahead of the step-3 access check). Computed once here
+    // and reused in step 3 so we don't double-fetch the subscription.
+    let subStatus = null;
+    if (user_id && SUPABASE_URL) {
+      subStatus = await getSubscriptionStatus(user_id);
+      if (!subStatus.hasAccess) {
+        console.log(`SCAN PATH: no access (pre-KB) user=${user_id}`);
+        return res.status(403).json({ error: subStatus.pastDue ? "Your payment is past due. Please update billing to continue scanning." : "Your free trial has ended. Subscribe to continue scanning." });
+      }
+    }
+
     // ── Step 2: Knowledge base lookup — runs for EVERY scan, EVERY user ──────────
     // This is the core of the learning system. Checks the permanent
     // fingerprint_knowledge table before doing anything else — no ACR call,
@@ -1689,27 +1704,33 @@ app.post("/scan", (req, res, next) => {
               last_artist: knownPlacement.artist || userExisting[0].last_artist || null,
             });
           } else {
-            // New user scanning this beat — register it for them immediately as placed
-            const storagePath = `${user_id}/${req.file.originalname}`;
-            await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
-            await sbInsert("beats", {
-              user_id,
-              filename:       req.file.originalname,
-              storage_path:   storagePath,
-              status:         "placed",
-              last_scanned:   new Date().toISOString(),
-              last_result:    knownPlacement.title,
-              last_artist:    knownPlacement.artist    || null,
-              spotify_id:     knownPlacement.spotify_id || null,
-              youtube_id:     knownPlacement.youtube_id || null,
-              uploaded_at:    new Date().toISOString(),
-              fingerprint_id: fingerprintId,
-              audio_hash:     audioHash,
-            });
-            // Only increment submission count for brand-new registrations
-            const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
-            const profile   = profiles?.[0];
-            if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used: (profile.submissions_used || 0) + 1 });
+            // New user scanning this beat — register it for them immediately as placed.
+            // Respect the submission cap for NEW registrations (re-tests of a beat the
+            // user already owns fall in the if-branch above and are intentionally uncapped).
+            if (subStatus && subStatus.submissionLimit !== null && subStatus.submissionsUsed >= subStatus.submissionLimit) {
+              console.log(`SCAN PATH: KB hit but submission cap reached — returning result without registering. user=${user_id}`);
+            } else {
+              const storagePath = `${user_id}/${req.file.originalname}`;
+              await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
+              await sbInsert("beats", {
+                user_id,
+                filename:       req.file.originalname,
+                storage_path:   storagePath,
+                status:         "placed",
+                last_scanned:   new Date().toISOString(),
+                last_result:    knownPlacement.title,
+                last_artist:    knownPlacement.artist    || null,
+                spotify_id:     knownPlacement.spotify_id || null,
+                youtube_id:     knownPlacement.youtube_id || null,
+                uploaded_at:    new Date().toISOString(),
+                fingerprint_id: fingerprintId,
+                audio_hash:     audioHash,
+              });
+              // Only increment submission count for brand-new registrations
+              const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
+              const profile   = profiles?.[0];
+              if (profile) await sbUpdate("profiles", `id=eq.${user_id}`, { submissions_used: (profile.submissions_used || 0) + 1 });
+            }
           }
         } catch (regErr) { console.error("Knowledge-base beat registration error (non-fatal):", regErr.message); }
       }
@@ -1739,7 +1760,7 @@ app.post("/scan", (req, res, next) => {
     // ── Step 3: Per-user access + quota checks (only reached if knowledge base missed) ──
     if (user_id && SUPABASE_URL) {
       console.log(`SCAN PATH: step3 access check — user=${user_id}`);
-      const status = await getSubscriptionStatus(user_id);
+      const status = subStatus || await getSubscriptionStatus(user_id);
       if (!status.hasAccess) { console.log(`SCAN PATH: no access`); return res.status(403).json({ error: status.pastDue ? "Your payment is past due. Please update billing to continue scanning." : "Your free trial has ended. Subscribe to continue scanning." }); }
       if (status.submissionLimit!==null && status.submissionsUsed>=status.submissionLimit) { console.log(`SCAN PATH: limit reached`); return res.status(403).json({ error:`Submission limit reached (${status.submissionsUsed}/${status.submissionLimit}). Upgrade to scan more beats.` }); }
 
@@ -2137,7 +2158,16 @@ app.post("/webhook", async (req, res) => {
     {
       const el=sig.split(",").reduce((a,e)=>{const p=e.split("=");a[p[0]]=p[1];return a;},{});
       const expected=crypto.createHmac("sha256",STRIPE_WEBHOOK).update(`${el.t}.${payload}`).digest("hex");
-      if (expected!==el.v1) { console.error("Webhook sig mismatch"); return res.status(400).json({ error:"Invalid signature" }); }
+      let sigOk=false;
+      try {
+        const a=Buffer.from(expected,"hex"), b=Buffer.from(el.v1||"","hex");
+        sigOk = a.length===b.length && crypto.timingSafeEqual(a,b);
+      } catch(_) { sigOk=false; }
+      if (!sigOk) { console.error("Webhook sig mismatch"); return res.status(400).json({ error:"Invalid signature" }); }
+      // Reject events whose timestamp is outside a 5-minute window — blunts replay
+      // of a captured, validly-signed payload.
+      const ts=parseInt(el.t,10);
+      if (!ts || Math.abs(Math.floor(Date.now()/1000)-ts) > 300) { console.error("Webhook timestamp outside tolerance"); return res.status(400).json({ error:"Stale signature" }); }
     }
     const event=JSON.parse(payload);
     console.log("Webhook:",event.type);
@@ -2251,6 +2281,7 @@ app.post("/auth/recover-profile", async (req, res) => {
   try {
     const { user_id, username } = req.body;
     if (!user_id||!username) return res.status(400).json({ error:"Missing fields." });
+    { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
     // Check profile doesn't already exist
     const existing = await sbSelect("profiles", `id=eq.${user_id}`);
     if (Array.isArray(existing)&&existing.length>0) return res.json({ exists:true, profile:existing[0] });
@@ -2279,8 +2310,25 @@ app.post("/profile", async (req, res) => {
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 app.get("/profile/:user_id", async (req, res) => {
-  try { const p=await sbSelect("profiles",`id=eq.${req.params.user_id}`); res.json(Array.isArray(p)?p[0]||null:null); }
-  catch(err) { res.status(500).json({ error:err.message }); }
+  try {
+    const me = await authOr401(req, res); if (!me) return;
+    if (me.id !== req.params.user_id) return res.status(403).json({ error:"Forbidden." });
+    const p = await sbSelect("profiles", `id=eq.${req.params.user_id}`);
+    const row = Array.isArray(p) ? (p[0] || null) : null;
+    if (!row) return res.json(null);
+    // Only return fields the client needs — never leak signup_ip, stripe_customer_id,
+    // fingerprint_log, or other internal columns.
+    res.json({
+      id: row.id,
+      username: row.username,
+      tier: row.tier,
+      subscription_status: row.subscription_status,
+      submissions_used: row.submissions_used,
+      email_monitors_used: row.email_monitors_used,
+      producer_since: row.producer_since || null,
+      created_at: row.created_at || null,
+    });
+  } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
 app.post("/profile/producer-since", async (req, res) => {
@@ -2290,6 +2338,102 @@ app.post("/profile/producer-since", async (req, res) => {
     { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
     await sbUpdate("profiles", `id=eq.${user_id}`, { producer_since: parseInt(producer_since) });
     res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Admin: reconcile tier terms for existing subscribers ──────────────────────
+// The plan limits are computed live from LIMITS[tier] on every request, so the
+// ONLY way an active subscriber sees the wrong monitor/submission numbers is if
+// their profile.tier drifted from what they actually pay, or a stored usage
+// counter sits above the current cap (showing e.g. 120/100, a stuck/over bar).
+// This walks every active/trialing profile and:
+//   1. For real Stripe subscribers, re-reads their live subscription and corrects
+//      profile.tier to match the price they're actually on (tier1 vs tier2).
+//   2. Clamps submissions_used / email_monitors_used into the current caps.
+// Comp accounts (COMP_TIER1/COMP_TIER2) and the admin account are limit-driven
+// dynamically, so their tier is left untouched (counters are still clamped).
+// SAFETY: dry-run by default. Add ?apply=1 to actually write. Never downgrades a
+// profile that has no live Stripe subscription (e.g. a hand-comped friend).
+app.post("/admin/reconcile-tiers", async (req, res) => {
+  const secret = process.env.ADMIN_SECRET || RESCAN_SECRET;
+  if ((req.headers["x-admin-secret"] || "") !== secret) return res.status(403).json({ error:"Forbidden" });
+  const apply = req.query.apply === "1";
+  const report = { dryRun: !apply, scanned: 0, tierFixed: [], clamped: [], noStripeSub: [], skippedComp: [], errors: [] };
+  try {
+    const profiles = await sbSelect("profiles", `subscription_status=in.(active,trialing)&limit=2000`);
+    if (!Array.isArray(profiles)) return res.status(500).json({ error:"Could not read profiles." });
+    for (const p of profiles) {
+      report.scanned++;
+      const uname  = (p.username || "").toLowerCase();
+      const isAdmin = uname === "trackmyplacements";
+      const isComp  = COMP_TIER1.has(uname) || COMP_TIER2.has(uname) || isAdmin;
+      let correctTier = p.tier;
+
+      // 1) Sync tier from the live Stripe subscription (paying users only).
+      if (!isComp && p.stripe_customer_id && STRIPE_KEY) {
+        try {
+          const subs = await stripeRequest(`/subscriptions?customer=${p.stripe_customer_id}&status=all&limit=10`);
+          const live = (subs.data || []).find(s => ["active","trialing","past_due"].includes(s.status));
+          if (live) {
+            const priceId = live.items?.data?.[0]?.price?.id || live.plan?.id;
+            const stripeTier = priceId === STRIPE_PRICE_T2 ? "tier2" : "tier1";
+            if (stripeTier !== p.tier) {
+              correctTier = stripeTier;
+              if (apply) await sbUpdate("profiles", `id=eq.${p.id}`, { tier: stripeTier });
+              report.tierFixed.push({ username: p.username, from: p.tier, to: stripeTier });
+            }
+          } else {
+            // No live subscription — leave the tier alone (likely a manual/DB comp).
+            report.noStripeSub.push({ username: p.username, tier: p.tier, status: p.subscription_status });
+          }
+        } catch(e) { report.errors.push({ username: p.username, error: e.message }); }
+      } else if (isComp) {
+        report.skippedComp.push({ username: p.username });
+      }
+
+      // 2) Clamp stored usage counters into the current caps so no bar ever shows
+      //    e.g. 120/100. Admin is uncapped, so skip clamping there.
+      if (!isAdmin) {
+        const capTier = isComp ? (COMP_TIER2.has(uname) ? "tier2" : "tier1") : (correctTier || "trial");
+        const caps = getLimits(capTier);
+        const updates = {};
+        if (caps.submissions   != null && (p.submissions_used    || 0) > caps.submissions)   updates.submissions_used    = caps.submissions;
+        if (caps.emailMonitors != null && (p.email_monitors_used || 0) > caps.emailMonitors) updates.email_monitors_used = caps.emailMonitors;
+        if (Object.keys(updates).length) {
+          if (apply) await sbUpdate("profiles", `id=eq.${p.id}`, updates);
+          report.clamped.push({ username: p.username, tier: capTier, before: { submissions_used: p.submissions_used, email_monitors_used: p.email_monitors_used }, after: updates });
+        }
+      }
+    }
+    res.json({ ok: true, ...report });
+  } catch(e) { console.error("reconcile-tiers error:", e.message); res.status(500).json({ error: e.message }); }
+});
+
+// ── Admin: hard-set a single user's tier (instant comp / fix one friend) ──────
+// For when you just need to put @someone on the right plan right now without a
+// deploy or a Supabase SQL trip. Grants access (subscription_status=active) for
+// paid tiers and clamps their counters into the new caps. A future Stripe webhook
+// for that customer can still overwrite this — for permanent free comps, prefer
+// adding the username to COMP_TIER1 / COMP_TIER2.
+app.post("/admin/set-tier", async (req, res) => {
+  const secret = process.env.ADMIN_SECRET || RESCAN_SECRET;
+  if ((req.headers["x-admin-secret"] || "") !== secret) return res.status(403).json({ error:"Forbidden" });
+  try {
+    const { username, tier } = req.body;
+    if (!username || !["tier1","tier2","trial"].includes(tier)) {
+      return res.status(400).json({ error:"Send { username, tier } where tier is tier1, tier2, or trial." });
+    }
+    const ps = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
+    const p = ps?.[0];
+    if (!p) return res.status(404).json({ error:"User not found." });
+    const caps = getLimits(tier);
+    const updates = { tier };
+    if (tier !== "trial") updates.subscription_status = "active"; // grant access immediately
+    if (caps.submissions   != null && (p.submissions_used    || 0) > caps.submissions)   updates.submissions_used    = caps.submissions;
+    if (caps.emailMonitors != null && (p.email_monitors_used || 0) > caps.emailMonitors) updates.email_monitors_used = caps.emailMonitors;
+    await sbUpdate("profiles", `id=eq.${p.id}`, updates);
+    console.log(`admin/set-tier: @${p.username} → ${tier}`);
+    res.json({ ok: true, username: p.username, applied: updates, limits: caps });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
