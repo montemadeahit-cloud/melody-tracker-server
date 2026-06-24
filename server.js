@@ -967,7 +967,10 @@ app.post("/auth/signin", async (req, res) => {
     if (!checkLoginRate(getIP(req))) return res.status(429).json({ error:"Too many sign-in attempts. Please wait a few minutes and try again." });
     const { username, password } = req.body;
     if (!username||!password) return res.status(400).json({ error:"All fields required." });
-    const profiles = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
+    // Case-insensitive username lookup. The frontend lowercases what the user types,
+    // but profile rows (especially the branded admin account) may be stored with
+    // capitals — an exact match would fail to find them and the login would bounce.
+    const profiles = await sbSelect("profiles", `username=ilike.${encodeURIComponent(username)}`);
     if (!Array.isArray(profiles)||profiles.length===0) {
       // Also try looking up by checking if username matches an auth user with that email pattern
       return res.status(400).json({ error:"Username not found. If you just signed up, your account may still be setting up — please wait a moment and try again." });
