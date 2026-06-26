@@ -851,9 +851,11 @@ async function getSubscriptionStatus(user_id) {
     // During the trial, grant the chosen tier's limits unless TRIAL_USES_TIER_LIMITS=false.
     const limitTier = (trialActive && !TRIAL_USES_TIER_LIMITS) ? "trial" : (tier || "trial");
     const limits = getLimits(limitTier);
+    // A real Stripe sub exists in trialing/active/past_due — all are cancellable.
+    const canCancel = !!profile.stripe_customer_id && (trialActive || subscriptionActive || pastDue);
     return {
       hasAccess: (trialActive || subscriptionActive) && !pastDue,
-      trialActive, subscriptionActive, pastDue, daysLeft,
+      trialActive, subscriptionActive, pastDue, daysLeft, canCancel,
       trialEnd: trialEnd.toISOString(), tier, tierLabel: limits.label,
       submissionsUsed, submissionLimit: limits.submissions,
       emailMonitorsUsed, emailMonitorLimit: limits.emailMonitors,
@@ -882,9 +884,11 @@ async function getSubscriptionStatus(user_id) {
   }
 
   const limits = getLimits(tier || "trial");
+  // Legacy trials are cardless, so only active/past_due subs are cancellable.
+  const canCancel = !!profile.stripe_customer_id && (subscriptionActive || pastDue);
   return {
     hasAccess: (trialActive || subscriptionActive) && !pastDue,
-    trialActive, subscriptionActive, pastDue, daysLeft,
+    trialActive, subscriptionActive, pastDue, daysLeft, canCancel,
     trialEnd: trialEnd.toISOString(), tier, tierLabel: limits.label,
     submissionsUsed, submissionLimit: limits.submissions,
     emailMonitorsUsed, emailMonitorLimit: limits.emailMonitors,
@@ -2196,9 +2200,16 @@ app.post("/cancel", async (req, res) => {
     const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
     const profile  = profiles?.[0];
     if (!profile?.stripe_customer_id) return res.status(400).json({ error:"No subscription found." });
-    const subs = await stripeRequest(`/subscriptions?customer=${profile.stripe_customer_id}&status=active`);
-    if (!subs.data?.length) return res.status(400).json({ error:"No active subscription found." });
-    const cancelled = await stripeRequest(`/subscriptions/${subs.data[0].id}`,"POST",{ cancel_at_period_end:"true" });
+    // Include trialing + past_due, not just active — these all have a live, cancellable sub.
+    const subs = await stripeRequest(`/subscriptions?customer=${profile.stripe_customer_id}&status=all`);
+    const live = (subs.data || []).filter(s => ["trialing","active","past_due"].includes(s.status));
+    const target = live.find(s => !s.cancel_at_period_end);
+    if (!target) {
+      // Already scheduled to cancel, or nothing live — treat as success so the UI stays clean.
+      if (live.length) return res.json({ success:true });
+      return res.status(400).json({ error:"No active subscription found." });
+    }
+    const cancelled = await stripeRequest(`/subscriptions/${target.id}`,"POST",{ cancel_at_period_end:"true" });
     if (cancelled.error) return res.status(400).json({ error:cancelled.error.message });
     res.json({ success:true });
   } catch(e) { res.status(500).json({ error:e.message }); }
