@@ -1507,7 +1507,60 @@ async function knowledgeWrite({ fingerprint_id, title, artist, spotify_id, youtu
   } catch(e) { console.error("knowledgeWrite error:", e.message); }
 }
 
-// ── Manual placement verification (user-submitted platform link) ──
+// ── Beat placements — one beat can have MANY confirmed song placements ──
+// beats.last_result/last_artist/spotify_id/youtube_id are kept as "most recent
+// placement" for backward-compat with the existing list/badge UI. beat_placements
+// is the full, append-only history — this is what Library "placed" clicks read
+// so a beat used in 3 songs shows all 3, not just whichever was found most recently.
+//
+// Required Supabase SQL (run once):
+//   CREATE TABLE IF NOT EXISTS beat_placements (
+//     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+//     beat_id       uuid NOT NULL REFERENCES beats(id) ON DELETE CASCADE,
+//     user_id       uuid NOT NULL,
+//     title         text NOT NULL,
+//     artist        text,
+//     spotify_id    text,
+//     youtube_id    text,
+//     score         numeric,
+//     corroborated  boolean DEFAULT false,
+//     source        text DEFAULT 'auto_scan',   -- auto_scan | rescan | user_verified
+//     found_at      timestamptz DEFAULT now()
+//   );
+//   CREATE UNIQUE INDEX IF NOT EXISTS beat_placements_beat_title
+//     ON beat_placements (beat_id, lower(title));
+
+async function getPlacements(beat_id) {
+  try { return await sbSelect("beat_placements", `beat_id=eq.${beat_id}&order=found_at.asc`) || []; }
+  catch(e) { console.error("getPlacements error:", e.message); return []; }
+}
+
+// Adds a placement row for this beat if the title isn't already recorded for it.
+// Returns the inserted row if it was new, or null if it was a dup / failed.
+async function addPlacementIfNew(beat_id, user_id, match, source) {
+  const title = match?.title; if (!beat_id || !title) return null;
+  const key = normaliseTitle(title); if (!key) return null;
+  try {
+    const existing = await getPlacements(beat_id);
+    if (existing.some(p => normaliseTitle(p.title) === key)) return null; // already known for this beat
+    const row = {
+      beat_id, user_id,
+      title,
+      artist:       match.artists?.[0]?.name || null,
+      spotify_id:   match.external_metadata?.spotify?.track?.id || null,
+      youtube_id:   match.external_metadata?.youtube?.vid || null,
+      score:        match.score || null,
+      corroborated: !!match._corroborated,
+      source:       source || "auto_scan",
+    };
+    const r = await sbInsert("beat_placements", row);
+    const inserted = Array.isArray(r) ? r[0] : r;
+    if (inserted) console.log(`Placement recorded: beat=${beat_id} → "${title}" (${source})`);
+    return inserted;
+  } catch(e) { console.error("addPlacementIfNew error:", e.message); return null; }
+}
+
+
 // When a scan finds NO match but the producer knows where the beat is
 // placed, they paste a platform link in the UI. The frontend verifies
 // it via the appropriate lookup endpoint, then calls this to PERSIST it
@@ -1543,6 +1596,18 @@ app.post("/verify-placement", async (req, res) => {
 
     const updated = await sbUpdate("beats", `id=eq.${beat.id}`, updatePayload);
     console.log("Manual placement verified:", beat.id, "→", title, platform || "spotify", spotify_id || youtube_id || track_url || "(no id)");
+
+    // Record this as one entry in the beat's full placement history (not a
+    // single-slot overwrite) — a beat can have more than one confirmed song.
+    await addPlacementIfNew(beat.id, user_id, {
+      title, artists: artist ? [{ name: artist }] : [],
+      score: 100,
+      external_metadata: {
+        ...(spotify_id ? { spotify: { track: { id: spotify_id } } } : {}),
+        ...(youtube_id ? { youtube: { vid: youtube_id } } : {}),
+      },
+      _corroborated: true,
+    }, "user_verified");
 
     // ── Write to permanent knowledge base ──────────────────────
     // This is the key learning step — regardless of what happens to this
@@ -1597,13 +1662,31 @@ app.post("/remove-placement", async (req, res) => {
       //    can't auto-re-inject the placement. Other users' rows are untouched.
       const fp = beat.fingerprint_id || fingerprint_id;
       if (fp) { try { await sbDelete("fingerprint_knowledge", `fingerprint_id=eq.${encodeURIComponent(fp)}&verified_by=eq.${user_id}`); } catch(e) {} }
-      // 3. Delete the beat row itself — this is what makes it stay gone.
+      // 3. Delete this beat's full placement history.
+      try { await sbDelete("beat_placements", `beat_id=eq.${beat.id}`); } catch(e) {}
+      // 4. Delete the beat row itself — this is what makes it stay gone.
       const ok = await sbDelete("beats", `id=eq.${beat.id}&user_id=eq.${user_id}`);
       if (ok) removed++;
     }
     console.log(`Placement removed (hard delete): user=${user_id} beats=${removed} (${beat_id || fingerprint_id || title})`);
     res.json({ success: true, removed });
   } catch (e) { console.error("remove-placement error:", e.message); res.status(500).json({ error: e.message }); }
+});
+
+// ── Full placement history for a beat ───────────────────────────
+// A beat can have more than one confirmed song — this returns all of them,
+// oldest first, so the Library "placed" view can show every match instead
+// of just the most recent one.
+app.get("/placements/:beat_id", async (req, res) => {
+  try {
+    const me = await authOr401(req, res); if (!me) return;
+    const beats = await sbSelect("beats", `id=eq.${req.params.beat_id}`);
+    const beat  = beats?.[0];
+    if (!beat) return res.status(404).json({ error: "Beat not found." });
+    if (beat.user_id !== me.id) return res.status(403).json({ error: "Not your beat." });
+    const placements = await getPlacements(beat.id);
+    res.json({ placements });
+  } catch (e) { console.error("placements fetch error:", e.message); res.status(500).json({ error: e.message }); }
 });
 
 // ── Scan debug — tests every DB + storage operation ──────────
@@ -1757,6 +1840,16 @@ app.post("/scan", (req, res, next) => {
 
       if (user_id && SUPABASE_URL) {
         try {
+          const knownAsMatch = {
+            title: knownPlacement.title,
+            artists: knownPlacement.artist ? [{ name: knownPlacement.artist }] : [],
+            score: 100,
+            external_metadata: {
+              ...(knownPlacement.spotify_id ? { spotify: { track: { id: knownPlacement.spotify_id } } } : {}),
+              ...(knownPlacement.youtube_id ? { youtube: { vid: knownPlacement.youtube_id } } : {}),
+            },
+            _corroborated: true,
+          };
           // Check if this user already has this beat — if so just update last_scanned
           const userExisting = await sbSelect("beats", `user_id=eq.${user_id}&fingerprint_id=eq.${encodeURIComponent(fingerprintId)}`);
           if (Array.isArray(userExisting) && userExisting.length > 0) {
@@ -1769,6 +1862,7 @@ app.post("/scan", (req, res, next) => {
               last_result: knownPlacement.title,
               last_artist: knownPlacement.artist || userExisting[0].last_artist || null,
             });
+            addPlacementIfNew(userExisting[0].id, user_id, knownAsMatch, "auto_scan").catch(e => console.error("addPlacementIfNew (KB existing) error:", e.message));
           } else {
             // New user scanning this beat — register it for them immediately as placed.
             // Respect the submission cap for NEW registrations (re-tests of a beat the
@@ -1778,7 +1872,7 @@ app.post("/scan", (req, res, next) => {
             } else {
               const storagePath = `${user_id}/${req.file.originalname}`;
               await storageUpload(storagePath, req.file.buffer, req.file.mimetype);
-              await sbInsert("beats", {
+              const kbInsert = await sbInsert("beats", {
                 user_id,
                 filename:       req.file.originalname,
                 storage_path:   storagePath,
@@ -1792,6 +1886,8 @@ app.post("/scan", (req, res, next) => {
                 fingerprint_id: fingerprintId,
                 audio_hash:     audioHash,
               });
+              const kbBeat = Array.isArray(kbInsert) ? kbInsert[0] : kbInsert;
+              if (kbBeat?.id) addPlacementIfNew(kbBeat.id, user_id, knownAsMatch, "auto_scan").catch(e => console.error("addPlacementIfNew (KB new) error:", e.message));
               // Only increment submission count for brand-new registrations
               const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
               const profile   = profiles?.[0];
@@ -2040,6 +2136,18 @@ app.post("/scan", (req, res, next) => {
             confidence:  95,
             source:      "auto_scan",
           }).catch(e => console.error("Knowledge write from auto-scan (non-fatal):", e.message));
+        }
+
+        // Record EVERY confident match from this scan as its own placement, not
+        // just the top-ranked one — a single beat can genuinely appear in more
+        // than one released song, and mergeAllResults() already ranks all of
+        // them from the slices/engines we already paid for in this same scan.
+        // This costs nothing extra: goodMusic was computed above from data we
+        // already have, we're just no longer throwing away everything past [0].
+        if (insertedBeat?.id && goodMusic.length > 0) {
+          for (const m of goodMusic) {
+            addPlacementIfNew(insertedBeat.id, user_id, m, "auto_scan").catch(e => console.error("addPlacementIfNew (scan) error:", e.message));
+          }
         }
       } catch(dbErr) { console.error("Post-scan DB error (non-fatal):", dbErr.message); }
     }
@@ -2598,6 +2706,13 @@ app.get("/admin/metrics", async (req, res) => {
 // Cost per beat per rescan = RESCAN_ACR_SLICES ACR calls (default 1, rotating),
 // ACR-only unless RESCAN_SECONDARY_ENGINES is on. Only beats uploaded within
 // RETIRE_DAYS are in the pool, so daily spend stays bounded as libraries grow.
+//
+// "placed" beats stay in this pool too (not just "monitoring") — a beat can
+// legitimately appear in more than one released song, so finding a first
+// placement no longer takes it out of rotation. Cost impact: same per-beat
+// ACR-only cost as any other monitored beat, still bounded by RETIRE_DAYS —
+// a beat drops out of the pool 30 days after upload regardless of status,
+// same as it always has.
 const rescanLog = { lastRun: null, lastResult: null };
 
 app.get("/rescan/status", (req, res) => {
@@ -2628,7 +2743,7 @@ const MAX_BEATS_PER_RUN = parseInt(process.env.MAX_BEATS_PER_RUN || "800", 10);
 app.post("/rescan", async (req, res) => {
   if (req.headers["x-rescan-secret"]!==RESCAN_SECRET) return res.status(401).json({ error:"Unauthorized" });
   try {
-    let beatQuery = "status=eq.monitoring&order=last_scanned.asc";
+    let beatQuery = "status=in.(monitoring,placed)&order=last_scanned.asc";
     if (RETIRE_DAYS > 0) {
       const cutoff = new Date(Date.now() - RETIRE_DAYS*24*60*60*1000).toISOString();
       beatQuery += `&uploaded_at=gte.${cutoff}`;
@@ -2689,43 +2804,60 @@ app.post("/rescan", async (req, res) => {
         }
         const goodRescanMusic = rawMatched ? scanMusic.filter(isGoodRescanMatch) : [];
         const matched = goodRescanMusic.length > 0;
-        const bestRescan = matched ? goodRescanMusic[0] : null;
         scanned++;
         if (matched) {
-          const title     = bestRescan?.title;
-          const artist    = bestRescan?.artists?.[0]?.name;
-          const spotifyId = bestRescan?.external_metadata?.spotify?.track?.id;
-          const youtubeId = bestRescan?.external_metadata?.youtube?.vid;
-          if (title!==beat.last_result) {
+          // Compare every confident match from this pass against the beat's FULL
+          // placement history (not just the single last_result field) — this is
+          // what lets a second or third song using the same beat get caught,
+          // instead of being silently discarded because it isn't the newest.
+          const existingPlacements = await getPlacements(beat.id);
+          const existingKeys = new Set(existingPlacements.map(p => normaliseTitle(p.title)));
+          const candidateNew = goodRescanMusic.filter(m => !existingKeys.has(normaliseTitle(m.title)));
+
+          if (candidateNew.length > 0) {
             const canEmail=RESEND_KEY&&(status.emailMonitorLimit===null||(status.emailMonitorLimit>0&&status.emailMonitorsUsed<status.emailMonitorLimit));
-            let emailed=false, attempted=false;
+            let uData=null;
             if (canEmail) {
               const uRes=await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${beat.user_id}`,{headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`}});
-              const uData=await uRes.json();
-              if (uData?.email) {
-                attempted=true;
-                const sendRes=await sendEmail(uData.email,`🎵 New placement found: "${beat.filename}"`,placementEmailHtml(beat.filename,title,artist,spotifyId,youtubeId));
-                emailed=!!(sendRes && (sendRes.id || sendRes.data));
-                if (!emailed) console.error(`CRITICAL: placement email FAILED for beat ${beat.id} user ${beat.user_id} — keeping it in the monitoring pool to retry next rescan.`);
-              }
+              uData=await uRes.json().catch(()=>null);
             }
-            // Only "place" the beat (which removes it from the monitoring pool) once the
-            // user has actually been notified — or when we legitimately can't email
-            // (no key, or they're over their monthly alert cap). If an email was
-            // attempted and failed, leave it monitoring so the alert retries next run.
-            if (emailed || !attempted) {
-              await sbUpdate("beats",`id=eq.${beat.id}`,{ status:"placed", last_scanned:new Date().toISOString(), last_result:title, last_artist:artist||null, spotify_id:spotifyId||null, youtube_id:youtubeId||null });
-              if (emailed) {
-                newMatches++;
-                if (status.emailMonitorLimit!==null) {
-                  const ps=await sbSelect("profiles",`id=eq.${beat.user_id}`);
-                  const p=ps?.[0];
-                  if (p) await sbUpdate("profiles",`id=eq.${beat.user_id}`,{ email_monitors_used:(p.email_monitors_used||0)+1 });
+            let emailsSentThisBeat=0, latestPlaced=null;
+            for (const m of candidateNew) {
+              const title=m.title, artist=m.artists?.[0]?.name, spotifyId=m.external_metadata?.spotify?.track?.id, youtubeId=m.external_metadata?.youtube?.vid;
+              const stillHaveQuota = status.emailMonitorLimit===null || (status.emailMonitorsUsed+emailsSentThisBeat) < status.emailMonitorLimit;
+              let emailed=false, attempted=false;
+              if (canEmail && uData?.email && stillHaveQuota) {
+                attempted=true;
+                const isFirstEver = existingPlacements.length===0 && emailsSentThisBeat===0;
+                const subject = isFirstEver ? `🎵 New placement found: "${beat.filename}"` : `🎵 Another placement found: "${beat.filename}"`;
+                const sendRes=await sendEmail(uData.email,subject,placementEmailHtml(beat.filename,title,artist,spotifyId,youtubeId));
+                emailed=!!(sendRes && (sendRes.id || sendRes.data));
+                if (!emailed) console.error(`CRITICAL: placement email FAILED for beat ${beat.id} user ${beat.user_id} title="${title}" — will retry next rescan.`);
+              }
+              // Only persist a placement once the user's actually been notified, or when
+              // we legitimately can't notify (no key / over their monthly alert cap). If
+              // an email was attempted and failed, skip it so it retries clean next cycle.
+              if (emailed || !attempted) {
+                const inserted = await addPlacementIfNew(beat.id, beat.user_id, m, "rescan");
+                if (inserted) {
+                  latestPlaced = { title, artist, spotifyId, youtubeId };
+                  if (emailed) { emailsSentThisBeat++; newMatches++; }
                 }
               }
+            }
+            if (emailsSentThisBeat>0 && status.emailMonitorLimit!==null) {
+              const ps=await sbSelect("profiles",`id=eq.${beat.user_id}`);
+              const p=ps?.[0];
+              if (p) await sbUpdate("profiles",`id=eq.${beat.user_id}`,{ email_monitors_used:(p.email_monitors_used||0)+emailsSentThisBeat });
+            }
+            if (latestPlaced) {
+              await sbUpdate("beats",`id=eq.${beat.id}`,{ status:"placed", last_scanned:new Date().toISOString(), last_result:latestPlaced.title, last_artist:latestPlaced.artist||null, spotify_id:latestPlaced.spotifyId||null, youtube_id:latestPlaced.youtubeId||null });
             } else {
               await sbUpdate("beats",`id=eq.${beat.id}`,{ last_scanned:new Date().toISOString() });
             }
+          } else {
+            // Matched, but every song found this pass is already on record for this beat.
+            await sbUpdate("beats",`id=eq.${beat.id}`,{ last_scanned:new Date().toISOString() });
           }
         } else { await sbUpdate("beats",`id=eq.${beat.id}`,{ last_scanned:new Date().toISOString() }); }
         // Stagger requests — slightly longer gap to respect rate limits across 3 engines
