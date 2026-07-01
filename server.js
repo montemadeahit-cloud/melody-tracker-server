@@ -107,6 +107,22 @@ const CARD_REQUIRED_TRIAL_DAYS = 7;
 // LIMITS.trial (25 scans / 0 monitors) instead.
 const TRIAL_USES_TIER_LIMITS = true;
 
+// ── HTML escaping for email templates ───────────────────────────
+// Any user-controlled string (username, filename, title/artist submitted via
+// verify-placement, support form fields) MUST go through this before landing
+// in an email template — those templates interpolate raw strings into HTML,
+// and several of these values come straight from user input with no format
+// restriction. Without this, someone could inject markup/links into emails
+// sent to themselves, other users (via the shared knowledge base), or you.
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // ── IP helpers ────────────────────────────────────────────────
 function getIP(req) {
   return req.headers["x-forwarded-for"]?.split(",")[0].trim()
@@ -142,6 +158,11 @@ function makeRateLimiter(max, windowMs) {
 const checkLoginRate   = makeRateLimiter(12, 15*60*1000); // brute-force guard: 12 / 15 min
 const checkForgotRate  = makeRateLimiter(5,  60*60*1000); // 5 / hour
 const checkSupportRate = makeRateLimiter(8,  60*60*1000); // 8 / hour
+// The 4 track-lookup endpoints (spotify/apple/youtube/soundcloud) take no auth
+// by design (called before the app always has a token handy) and had NO rate
+// limiting at all — anyone could script-hammer them, running up your outbound
+// request volume and risking your server's IP getting rate-limited upstream.
+const checkLookupRate  = makeRateLimiter(40, 10*60*1000); // 40 / 10 min per IP
 
 // Rolling log of the most recent Stripe webhook events (in-memory, last 50).
 // Lets /admin/metrics surface whether webhooks are arriving and verifying — a
@@ -354,6 +375,14 @@ function normaliseTitle(t) {
     .toLowerCase()
     .replace(/\s*[\(\[].*(feat|ft|prod|remix|edit|version|remaster|explicit|clean|radio).*[\)\]]/gi, "")
     .replace(/\s*-\s*(feat|ft|prod|remix|edit|version|remaster|explicit|clean|radio).*/gi, "")
+    // Strip punctuation entirely and collapse whitespace — different DSPs/engines
+    // often return the same song with slightly different punctuation or spacing
+    // ("Song Name!" vs "Song Name", double spaces, curly vs straight quotes).
+    // Without this, the same real song could get recorded as two "different"
+    // placements and trigger a spurious duplicate notification email.
+    .replace(/['’"“”.,!?:;]/g, "")
+    .replace(/^(the|a|an)\s+/i, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 function mergeAllResults(responses) {
@@ -700,6 +729,9 @@ function baseEmail(content) {
 }
 
 function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
+  const safeFilename = escapeHtml(filename);
+  const safeTitle    = escapeHtml(title);
+  const safeArtist   = escapeHtml(artist);
   const link = spotifyId ? `https://open.spotify.com/track/${spotifyId}` : youtubeId ? `https://youtube.com/watch?v=${youtubeId}` : null;
   const platformLabel = spotifyId ? "Listen on Spotify ↗" : youtubeId ? "Watch on YouTube ↗" : null;
   return baseEmail(`
@@ -710,13 +742,13 @@ function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
     <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:${EM.card2};border:1px solid ${EM.border2};border-radius:14px;margin-bottom:22px;">
       <tr><td style="padding:20px 22px;">
         <div style="font-size:10px;font-weight:700;color:${EM.red};letter-spacing:.14em;text-transform:uppercase;margin-bottom:9px;font-family:${EM.font};">Recognized as</div>
-        <div style="font-size:21px;font-weight:800;color:${EM.text};letter-spacing:-.4px;line-height:1.25;margin-bottom:5px;font-family:${EM.font};">${title}</div>
-        <div style="font-size:13px;color:${EM.text2};font-family:${EM.font};">${artist || "Unknown artist"}</div>
+        <div style="font-size:21px;font-weight:800;color:${EM.text};letter-spacing:-.4px;line-height:1.25;margin-bottom:5px;font-family:${EM.font};">${safeTitle}</div>
+        <div style="font-size:13px;color:${EM.text2};font-family:${EM.font};">${safeArtist || "Unknown artist"}</div>
       </td></tr>
     </table>
 
     <div style="font-size:10px;font-weight:700;color:${EM.text3};text-transform:uppercase;letter-spacing:.14em;margin-bottom:6px;font-family:${EM.font};">Your beat</div>
-    <div style="font-size:14px;font-weight:600;color:${EM.text};margin-bottom:26px;line-height:1.4;font-family:${EM.font};">${filename}</div>
+    <div style="font-size:14px;font-weight:600;color:${EM.text};margin-bottom:26px;line-height:1.4;font-family:${EM.font};">${safeFilename}</div>
 
     ${link ? emailButton(link, platformLabel, true) : ""}
 
@@ -725,10 +757,11 @@ function placementEmailHtml(filename, title, artist, spotifyId, youtubeId) {
 }
 
 function trialEndingEmailHtml(username, tierLabel, price, endsWhen) {
+  const safeUsername = escapeHtml(username);
   return baseEmail(`
     ${emailEyebrow("● Trial ending soon")}
     ${emailH1("Your trial is almost up.")}
-    <p style="font-size:14.5px;color:${EM.text2};line-height:1.7;margin:0 0 22px;font-family:${EM.font};">Hey @${username} — a heads up that your free trial ends ${endsWhen}. After that your ${tierLabel} plan begins and your card is charged <span style="color:${EM.text};font-weight:600;">${price}/month</span>, then monthly until you cancel.</p>
+    <p style="font-size:14.5px;color:${EM.text2};line-height:1.7;margin:0 0 22px;font-family:${EM.font};">Hey @${safeUsername} — a heads up that your free trial ends ${endsWhen}. After that your ${tierLabel} plan begins and your card is charged <span style="color:${EM.text};font-weight:600;">${price}/month</span>, then monthly until you cancel.</p>
     <p style="font-size:14.5px;color:${EM.text2};line-height:1.7;margin:0 0 26px;font-family:${EM.font};">Want to keep monitoring? You don't need to do anything. Not ready? You can cancel anytime from your account before the trial ends and you won't be charged.</p>
     ${emailButton(APP_URL, "Open your dashboard ↗", true)}
     <p style="margin:24px 0 0;font-size:12.5px;color:${EM.text3};line-height:1.6;font-family:${EM.font};">Manage or cancel your plan anytime under Account. All payments are final and non-refundable.</p>
@@ -746,6 +779,7 @@ function passwordResetEmailHtml(resetUrl) {
 }
 
 function welcomeEmailHtml(username) {
+  const safeUsername = escapeHtml(username);
   const features = [
     ["Fingerprint registered","A permanent, content-based ID assigned the moment you upload."],
     ["Instant scan","Checked immediately across Spotify, Apple Music, YouTube, TikTok & more."],
@@ -754,7 +788,7 @@ function welcomeEmailHtml(username) {
   ];
   return baseEmail(`
     ${emailEyebrow("Welcome")}
-    ${emailH1(`You're in, @${username}.`)}
+    ${emailH1(`You're in, @${safeUsername}.`)}
     <p style="font-size:14.5px;color:${EM.text2};line-height:1.75;margin:0 0 26px;font-family:${EM.font};">Your beats don't have an identifier on the internet yet — that's why placements slip by. Upload one and we fingerprint it, scan every major platform instantly, and email you the moment it surfaces.</p>
 
     <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:28px;">
@@ -930,12 +964,19 @@ app.post("/auth/signup", async (req, res) => {
   try {
     const { username, email, password } = req.body;
     if (!username||!email||!password) return res.status(400).json({ error:"All fields required." });
+    // Constrain the character set/length now — this is what's rendered raw into
+    // your own admin-notification emails and (via knowledge-base placements)
+    // potentially other users' emails too, so keep it to something safe and sane.
+    const trimmedUsername = username.trim();
+    if (!/^[a-zA-Z0-9_.]{3,24}$/.test(trimmedUsername)) {
+      return res.status(400).json({ error:"Username must be 3-24 characters — letters, numbers, underscore, or period only." });
+    }
 
     const isDev = DEV_EMAILS.includes((email||"").toLowerCase().trim());
     const ip = getIP(req);
     if (!isDev && !checkSignupRate(ip)) return res.status(429).json({ error:"Too many accounts created from this connection. Try again later." });
 
-    const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(username)}`);
+    const existing = await sbSelect("profiles", `username=eq.${encodeURIComponent(trimmedUsername)}`);
     if (Array.isArray(existing)&&existing.length>0) return res.status(400).json({ error:"Username already taken." });
 
     // Block if this IP already has an active trial — skip for dev
@@ -972,7 +1013,7 @@ app.post("/auth/signup", async (req, res) => {
     try {
       const insertResult = await sbInsert("profiles", {
         id: userId,
-        username,
+        username: trimmedUsername,
         trial_start: new Date().toISOString(),
         tier: "trial",
         submissions_used: 0,
@@ -992,15 +1033,15 @@ app.post("/auth/signup", async (req, res) => {
 
     // Send branded welcome email (non-blocking)
     if (RESEND_KEY) {
-      sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(username)).catch(console.error);
+      sendEmail(email, "Welcome to TrackMyPlacements 🎵", welcomeEmailHtml(trimmedUsername)).catch(console.error);
       // Notify admin of new signup — bold, branded, high-contrast
-      sendEmail("trackmyplacements@gmail.com", `New signup: @${username}`, baseEmail(`
+      sendEmail("trackmyplacements@gmail.com", `New signup: @${trimmedUsername}`, baseEmail(`
         ${emailEyebrow("● New signup")}
-        <div style="font-size:34px;font-weight:800;color:${EM.text};letter-spacing:-.7px;line-height:1.1;margin-bottom:22px;font-family:${EM.font};">@${username}</div>
+        <div style="font-size:34px;font-weight:800;color:${EM.text};letter-spacing:-.7px;line-height:1.1;margin-bottom:22px;font-family:${EM.font};">@${escapeHtml(trimmedUsername)}</div>
         <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:26px;">
           <tr>
             <td style="padding:11px 0;border-bottom:1px solid ${EM.border};"><span style="font-size:11px;font-weight:600;color:${EM.text3};text-transform:uppercase;letter-spacing:.1em;font-family:${EM.font};">Email</span></td>
-            <td style="padding:11px 0;border-bottom:1px solid ${EM.border};text-align:right;"><span style="font-size:13px;color:${EM.text};font-weight:500;font-family:${EM.font};">${email}</span></td>
+            <td style="padding:11px 0;border-bottom:1px solid ${EM.border};text-align:right;"><span style="font-size:13px;color:${EM.text};font-weight:500;font-family:${EM.font};">${escapeHtml(email)}</span></td>
           </tr>
           <tr>
             <td style="padding:11px 0;border-bottom:1px solid ${EM.border};"><span style="font-size:11px;font-weight:600;color:${EM.text3};text-transform:uppercase;letter-spacing:.1em;font-family:${EM.font};">Signed up</span></td>
@@ -1008,19 +1049,19 @@ app.post("/auth/signup", async (req, res) => {
           </tr>
           <tr>
             <td style="padding:11px 0;"><span style="font-size:11px;font-weight:600;color:${EM.text3};text-transform:uppercase;letter-spacing:.1em;font-family:${EM.font};">IP</span></td>
-            <td style="padding:11px 0;text-align:right;"><span style="font-size:12px;color:${EM.text2};font-family:monospace;">${ip}</span></td>
+            <td style="padding:11px 0;text-align:right;"><span style="font-size:12px;color:${EM.text2};font-family:monospace;">${escapeHtml(ip)}</span></td>
           </tr>
         </table>
         ${emailButton(APP_URL, "View dashboard ↗", true)}
       `)).catch(console.error);
     }
 
-    if (accessToken) return res.json({ access_token:accessToken, refresh_token:authData.refresh_token||null, user:{ id:userId, email:authData.user?.email||email, username } });
+    if (accessToken) return res.json({ access_token:accessToken, refresh_token:authData.refresh_token||null, user:{ id:userId, email:authData.user?.email||email, username: trimmedUsername } });
 
     const siRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email, password }) });
     const siData = await siRes.json();
     if (siData.error) return res.status(400).json({ error:"Account created! Please sign in." });
-    res.json({ access_token:siData.access_token, refresh_token:siData.refresh_token||null, user:{ id:siData.user?.id||userId, email:siData.user?.email||email, username } });
+    res.json({ access_token:siData.access_token, refresh_token:siData.refresh_token||null, user:{ id:siData.user?.id||userId, email:siData.user?.email||email, username: trimmedUsername } });
   } catch(e) { console.error("Signup error:",e.message); res.status(500).json({ error:e.message }); }
 });
 
@@ -1123,8 +1164,11 @@ app.post("/support", async (req, res) => {
     const { name, email, message, username, userId } = req.body;
     if (!message || !message.trim()) return res.status(400).json({ error: "Message required." });
 
-    const senderName  = name || username || "Anonymous";
+    const senderName  = escapeHtml(name || username || "Anonymous");
     const replyEmail  = email || null;
+    const safeReplyEmail = escapeHtml(replyEmail);
+    const safeUserId  = escapeHtml(userId);
+    const safeMessage = escapeHtml(message.trim());
     const subject     = `Support: ${senderName} — ${message.trim().slice(0, 60)}${message.trim().length > 60 ? "…" : ""}`;
 
     const html = `
@@ -1132,12 +1176,12 @@ app.post("/support", async (req, res) => {
         <div style="background:#f4f4f5;border-radius:10px;padding:20px 24px;margin-bottom:16px;">
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#888;margin-bottom:8px;">From</div>
           <div style="font-size:15px;font-weight:600;">${senderName}</div>
-          ${replyEmail ? `<div style="font-size:13px;color:#555;margin-top:2px;">${replyEmail}</div>` : ""}
-          ${userId ? `<div style="font-size:11px;color:#aaa;margin-top:4px;">User ID: ${userId}</div>` : ""}
+          ${replyEmail ? `<div style="font-size:13px;color:#555;margin-top:2px;">${safeReplyEmail}</div>` : ""}
+          ${userId ? `<div style="font-size:11px;color:#aaa;margin-top:4px;">User ID: ${safeUserId}</div>` : ""}
         </div>
         <div style="background:#ffffff;border:1px solid #e4e4e7;border-radius:10px;padding:20px 24px;">
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#888;margin-bottom:10px;">Message</div>
-          <div style="font-size:15px;line-height:1.75;white-space:pre-wrap;">${message.trim()}</div>
+          <div style="font-size:15px;line-height:1.75;white-space:pre-wrap;">${safeMessage}</div>
         </div>
         <div style="margin-top:12px;font-size:11px;color:#aaa;">Sent via TrackMyPlacements support form</div>
       </div>
@@ -1248,6 +1292,7 @@ function extractSpotifyArtist(html) {
 
 app.get("/spotify-track/:id", async (req, res) => {
   try {
+    if (!checkLookupRate(getIP(req))) return res.status(429).json({ error: "Too many lookups. Please wait a bit and try again." });
     const id = req.params.id.split("?")[0].split("#")[0];
     if (!id || !/^[A-Za-z0-9]{10,30}$/.test(id)) return res.status(400).json({ error: "Invalid track ID." });
 
@@ -1322,6 +1367,7 @@ app.get("/spotify-track/:id", async (req, res) => {
 // ── Apple Music track lookup (iTunes Search API — no credentials needed) ──
 app.get("/apple-track", async (req, res) => {
   try {
+    if (!checkLookupRate(getIP(req))) return res.status(429).json({ error: "Too many lookups. Please wait a bit and try again." });
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "Missing url parameter." });
 
@@ -1355,6 +1401,7 @@ app.get("/apple-track", async (req, res) => {
 // ── YouTube track lookup (oEmbed — no credentials needed) ──
 app.get("/youtube-track", async (req, res) => {
   try {
+    if (!checkLookupRate(getIP(req))) return res.status(429).json({ error: "Too many lookups. Please wait a bit and try again." });
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "Missing url parameter." });
 
@@ -1402,6 +1449,7 @@ app.get("/youtube-track", async (req, res) => {
 // ── SoundCloud track lookup (oEmbed — no credentials needed) ──
 app.get("/soundcloud-track", async (req, res) => {
   try {
+    if (!checkLookupRate(getIP(req))) return res.status(429).json({ error: "Too many lookups. Please wait a bit and try again." });
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "Missing url parameter." });
 
@@ -2190,6 +2238,13 @@ app.delete("/beats/:beat_id", async (req, res) => {
     if (!Array.isArray(beats)||beats.length===0) return res.status(404).json({ error:"Beat not found." });
     if (beats[0].user_id !== me.id) return res.status(403).json({ error:"Not your beat." });
     if (beats[0].storage_path) await storageDelete(beats[0].storage_path);
+    // Clean up this user's knowledge-base rows for this fingerprint too — otherwise
+    // deleting a beat and re-uploading the same file can auto-reappear as "placed"
+    // via the knowledge-base hit path, which is surprising after an explicit delete.
+    // (beat_placements rows cascade-delete via the FK once the beat row is gone.)
+    if (beats[0].fingerprint_id) {
+      try { await sbDelete("fingerprint_knowledge", `fingerprint_id=eq.${encodeURIComponent(beats[0].fingerprint_id)}&verified_by=eq.${me.id}`); } catch(e) {}
+    }
     res.json({ success: await sbDelete("beats", `id=eq.${req.params.beat_id}&user_id=eq.${me.id}`) });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
