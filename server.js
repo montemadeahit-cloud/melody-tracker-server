@@ -778,14 +778,17 @@ function welcomeEmailHtml(username) {
 async function getSubscriptionStatus(user_id) {
   const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
   const profile  = profiles?.[0];
-  if (!profile) return { hasAccess:false, trialActive:false, subscriptionActive:false, daysLeft:0, submissionsUsed:0, submissionLimit:25, emailMonitorsUsed:0, emailMonitorLimit:0 };
+  if (!profile) return { hasAccess:false, trialActive:false, subscriptionActive:false, daysLeft:0, canCancel:false, submissionsUsed:0, submissionLimit:25, emailMonitorsUsed:0, emailMonitorLimit:0 };
 
   // Admin account — unlimited everything, flagged for the gold ADMIN pill.
+  // canCancel is always true here: the "Cancel subscription" control must be
+  // visible on every account type, no exceptions. /cancel itself handles the
+  // "nothing is actually billed" case gracefully instead of hiding the button.
   if (profile.username && profile.username.toLowerCase()==="trackmyplacements") {
     return {
       hasAccess: true, admin: true, trialActive: false, subscriptionActive: true, pastDue: false,
       daysLeft: 9999, trialEnd: new Date(Date.now() + 9999*24*60*60*1000).toISOString(),
-      tier: "admin", tierLabel: "ADMIN",
+      tier: "admin", tierLabel: "ADMIN", canCancel: true,
       submissionsUsed: profile.submissions_used || 0, submissionLimit: null,
       emailMonitorsUsed: profile.email_monitors_used || 0, emailMonitorLimit: null,
     };
@@ -797,7 +800,7 @@ async function getSubscriptionStatus(user_id) {
     return {
       hasAccess: true, trialActive: false, subscriptionActive: true, pastDue: false,
       daysLeft: 9999, trialEnd: new Date(Date.now() + 9999*24*60*60*1000).toISOString(),
-      tier: "tier2", tierLabel: compLimits.label,
+      tier: "tier2", tierLabel: compLimits.label, canCancel: true,
       submissionsUsed: profile.submissions_used || 0, submissionLimit: compLimits.submissions,
       emailMonitorsUsed: profile.email_monitors_used || 0, emailMonitorLimit: compLimits.emailMonitors,
     };
@@ -809,7 +812,7 @@ async function getSubscriptionStatus(user_id) {
     return {
       hasAccess: true, trialActive: false, subscriptionActive: true, pastDue: false,
       daysLeft: 9999, trialEnd: new Date(Date.now() + 9999*24*60*60*1000).toISOString(),
-      tier: "tier1", tierLabel: compLimits.label,
+      tier: "tier1", tierLabel: compLimits.label, canCancel: true,
       submissionsUsed: profile.submissions_used || 0, submissionLimit: compLimits.submissions,
       emailMonitorsUsed: profile.email_monitors_used || 0, emailMonitorLimit: compLimits.emailMonitors,
     };
@@ -851,8 +854,10 @@ async function getSubscriptionStatus(user_id) {
     // During the trial, grant the chosen tier's limits unless TRIAL_USES_TIER_LIMITS=false.
     const limitTier = (trialActive && !TRIAL_USES_TIER_LIMITS) ? "trial" : (tier || "trial");
     const limits = getLimits(limitTier);
-    // A real Stripe sub exists in trialing/active/past_due — all are cancellable.
-    const canCancel = !!profile.stripe_customer_id && (trialActive || subscriptionActive || pastDue);
+    // The "Cancel" control must always be visible, regardless of billing state —
+    // /cancel handles the "nothing live to cancel" case with a clear message
+    // instead of the UI hiding the option outright.
+    const canCancel = true;
     return {
       hasAccess: (trialActive || subscriptionActive) && !pastDue,
       trialActive, subscriptionActive, pastDue, daysLeft, canCancel,
@@ -884,8 +889,10 @@ async function getSubscriptionStatus(user_id) {
   }
 
   const limits = getLimits(tier || "trial");
-  // Legacy trials are cardless, so only active/past_due subs are cancellable.
-  const canCancel = !!profile.stripe_customer_id && (subscriptionActive || pastDue);
+  // The "Cancel" control must always be visible, regardless of billing state —
+  // /cancel handles the "nothing live to cancel" case with a clear message
+  // instead of the UI hiding the option outright.
+  const canCancel = true;
   return {
     hasAccess: (trialActive || subscriptionActive) && !pastDue,
     trialActive, subscriptionActive, pastDue, daysLeft, canCancel,
@@ -2199,7 +2206,23 @@ app.post("/cancel", async (req, res) => {
     { const me = await authOr401(req, res); if (!me) return; if (me.id !== user_id) return res.status(403).json({ error:"Forbidden." }); }
     const profiles = await sbSelect("profiles", `id=eq.${user_id}`);
     const profile  = profiles?.[0];
-    if (!profile?.stripe_customer_id) return res.status(400).json({ error:"No subscription found." });
+    if (!profile) return res.status(400).json({ error:"Account not found." });
+
+    const uname = (profile.username || "").toLowerCase();
+
+    // Admin account — nothing is billed, so there's nothing for Stripe to cancel.
+    if (uname === "trackmyplacements") {
+      return res.json({ success:true, noBilling:true, notice:"This is the admin account — there's no billing to cancel." });
+    }
+    // Comped accounts — free access granted manually, no live Stripe subscription exists.
+    if (COMP_TIER1.has(uname) || COMP_TIER2.has(uname)) {
+      return res.json({ success:true, noBilling:true, notice:"Your access is complimentary and isn't billed. Email us if you'd like it removed." });
+    }
+    // Cardless legacy trial — nothing on file with Stripe, so it just expires on its own.
+    if (!profile.stripe_customer_id) {
+      return res.json({ success:true, noBilling:true, notice:"No card is on file — your trial simply expires on its own, you won't be charged." });
+    }
+
     // Include trialing + past_due, not just active — these all have a live, cancellable sub.
     const subs = await stripeRequest(`/subscriptions?customer=${profile.stripe_customer_id}&status=all`);
     const live = (subs.data || []).filter(s => ["trialing","active","past_due"].includes(s.status));
@@ -2207,7 +2230,7 @@ app.post("/cancel", async (req, res) => {
     if (!target) {
       // Already scheduled to cancel, or nothing live — treat as success so the UI stays clean.
       if (live.length) return res.json({ success:true });
-      return res.status(400).json({ error:"No active subscription found." });
+      return res.json({ success:true, noBilling:true, notice:"No active subscription found — nothing to cancel." });
     }
     const cancelled = await stripeRequest(`/subscriptions/${target.id}`,"POST",{ cancel_at_period_end:"true" });
     if (cancelled.error) return res.status(400).json({ error:cancelled.error.message });
@@ -2730,4 +2753,3 @@ app.listen(port, "0.0.0.0", () => {
   // ALTER TABLE profiles ADD COLUMN IF NOT EXISTS fingerprint_log JSONB DEFAULT '[]'::jsonb;
   console.log("Note: ensure profiles.fingerprint_log JSONB column exists in Supabase.");
 });
-
