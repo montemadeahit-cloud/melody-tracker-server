@@ -182,20 +182,29 @@ app.get("/admin/reset-ratelimit", (req, res) => {
 // ── Network resilience ────────────────────────────────────────
 // Outbound calls to Supabase (and Stripe) occasionally fail with transient,
 // non-HTTP errors like "Premature close" / "socket hang up" / "aborted" —
-// the connection dropping mid-response, usually a stale keep-alive socket
-// between Railway and the remote host. These aren't real failures (the
-// request itself is fine), so retry a couple times with a short backoff
-// before giving up. Only retries network-level throws, not HTTP error
-// statuses (a real 400/401/etc. should NOT be retried).
-async function fetchRetry(url, opts, retries = 2, delayMs = 300) {
+// the connection dropping mid-response. This is usually a stale keep-alive
+// socket, but can also mean the upstream (Supabase) is degraded — e.g. their
+// status page showing "Degraded Performance" on compute capacity — in which
+// case connections hang or drop repeatedly for longer stretches, not just a
+// single blip. Retry a few times with backoff+jitter, and give each attempt
+// its own timeout so a hanging/degraded connection doesn't stall the whole
+// request — it fails fast and retries instead. Only retries network-level
+// throws, not HTTP error statuses (a real 400/401/etc. should NOT be retried).
+async function fetchRetry(url, opts = {}, retries = 3, delayMs = 400, timeoutMs = 10000) {
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetch(url, opts);
+      const r = await fetch(url, Object.assign({}, opts, { signal: controller.signal }));
+      clearTimeout(timer);
+      return r;
     } catch (e) {
-      const transient = /premature close|socket hang up|aborted|ECONNRESET|ETIMEDOUT|network/i.test(e.message || "");
+      clearTimeout(timer);
+      const transient = /premature close|socket hang up|aborted|ECONNRESET|ETIMEDOUT|network|timeout/i.test(e.message || "") || e.name === "AbortError";
       if (attempt === retries || !transient) throw e;
-      console.error(`fetchRetry: transient error on attempt ${attempt + 1}/${retries + 1} for ${url}: ${e.message} — retrying`);
-      await new Promise(res => setTimeout(res, delayMs * (attempt + 1)));
+      const wait = delayMs * (attempt + 1) + Math.floor(Math.random() * 200);
+      console.error(`fetchRetry: transient error on attempt ${attempt + 1}/${retries + 1} for ${url}: ${e.message} — retrying in ${wait}ms`);
+      await new Promise(res => setTimeout(res, wait));
     }
   }
 }
