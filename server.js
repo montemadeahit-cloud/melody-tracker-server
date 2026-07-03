@@ -695,7 +695,11 @@ async function identify(buffer, filename, mimetype) {
 async function stripeRequest(path, method="GET", body=null) {
   const opts = { method, headers:{"Authorization":`Bearer ${STRIPE_KEY}`,"Content-Type":"application/x-www-form-urlencoded"} };
   if (body) opts.body = new URLSearchParams(body).toString();
-  const r = await fetch(`https://api.stripe.com/v1${path}`,opts); return r.json();
+  // Uses the same fetchRetry as Supabase calls — a cancellation request dying
+  // mid-flight from a network blip is exactly the scenario that could leave
+  // someone thinking they cancelled when Stripe never actually got the request.
+  const r = await fetchRetry(`https://api.stripe.com/v1${path}`, opts);
+  return r.json();
 }
 
 // ── Email ─────────────────────────────────────────────────────
@@ -3023,4 +3027,3 @@ app.listen(port, "0.0.0.0", () => {
   // ALTER TABLE profiles ADD COLUMN IF NOT EXISTS fingerprint_log JSONB DEFAULT '[]'::jsonb;
   console.log("Note: ensure profiles.fingerprint_log JSONB column exists in Supabase.");
 });
-
