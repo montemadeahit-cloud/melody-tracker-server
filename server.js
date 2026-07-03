@@ -197,6 +197,14 @@ app.get("/admin/reset-ratelimit", (req, res) => {
 // Returns a Response-like object (ok/status/headers/.text()/.json()) so
 // every existing caller keeps working unchanged.
 async function fetchRetry(url, opts = {}, retries = 3, delayMs = 400, timeoutMs = 10000) {
+  // Ask Supabase to skip gzip compression by default. A "Premature close" that
+  // fails 100% of the time (not just intermittently) is a classic symptom of
+  // something in the network path mishandling a compressed response — the
+  // connection gets cut before the compressed stream properly terminates.
+  // Plain, uncompressed responses sidestep that failure mode entirely. Callers
+  // can still override this by passing their own Accept-Encoding header.
+  const headers = Object.assign({ "Accept-Encoding": "identity" }, opts.headers || {});
+  opts = Object.assign({}, opts, { headers });
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
