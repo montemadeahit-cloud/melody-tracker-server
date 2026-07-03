@@ -179,6 +179,27 @@ app.get("/admin/reset-ratelimit", (req, res) => {
   res.json({ cleared: true });
 });
 
+// ── Network resilience ────────────────────────────────────────
+// Outbound calls to Supabase (and Stripe) occasionally fail with transient,
+// non-HTTP errors like "Premature close" / "socket hang up" / "aborted" —
+// the connection dropping mid-response, usually a stale keep-alive socket
+// between Railway and the remote host. These aren't real failures (the
+// request itself is fine), so retry a couple times with a short backoff
+// before giving up. Only retries network-level throws, not HTTP error
+// statuses (a real 400/401/etc. should NOT be retried).
+async function fetchRetry(url, opts, retries = 2, delayMs = 300) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fetch(url, opts);
+    } catch (e) {
+      const transient = /premature close|socket hang up|aborted|ECONNRESET|ETIMEDOUT|network/i.test(e.message || "");
+      if (attempt === retries || !transient) throw e;
+      console.error(`fetchRetry: transient error on attempt ${attempt + 1}/${retries + 1} for ${url}: ${e.message} — retrying`);
+      await new Promise(res => setTimeout(res, delayMs * (attempt + 1)));
+    }
+  }
+}
+
 // ── Auth verification ─────────────────────────────────────────
 // Verify a Supabase access token (Bearer header, or ?t= for media tags that
 // can't set headers) and return the authenticated user, or null.
@@ -189,7 +210,7 @@ async function getAuthUser(req) {
   if (!token && req.query && req.query.t) token = String(req.query.t);
   if (!token) return null;
   try {
-    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}` } });
+    const r = await fetchRetry(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}` } });
     if (!r.ok) return null;
     const u = await r.json();
     return (u && u.id) ? u : null;
@@ -204,9 +225,10 @@ async function authOr401(req, res) {
 
 // ── Supabase helpers ──────────────────────────────────────────
 async function sbInsert(table, row) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+  let r;
+  try { r = await fetchRetry(`${SUPABASE_URL}/rest/v1/${table}`, {
     method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`,"Prefer":"return=representation"}, body:JSON.stringify(row),
-  });
+  }); } catch(e) { console.error(`sbInsert(${table}) network error:`, e.message); return null; }
   const text = await r.text();
   if (!r.ok) {
     let detail = text;
@@ -218,31 +240,35 @@ async function sbInsert(table, row) {
   try { return JSON.parse(text); } catch(e) { console.error("sbInsert parse error:", table, r.status, text.slice(0,200)); return null; }
 }
 async function sbSelect(table, filter) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+  let r;
+  try { r = await fetchRetry(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
     headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
-  });
+  }); } catch(e) { console.error(`sbSelect(${table}) network error:`, e.message); return []; }
   const text = await r.text();
   if (!text || !text.trim()) { console.error("sbSelect empty response:", r.status, table, filter); return []; }
   try { return JSON.parse(text); } catch(e) { console.error("sbSelect parse error:", table, r.status, text.slice(0,200)); return []; }
 }
 async function sbUpdate(table, filter, row) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+  let r;
+  try { r = await fetchRetry(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
     method:"PATCH", headers:{"Content-Type":"application/json","apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`}, body:JSON.stringify(row),
-  });
+  }); } catch(e) { console.error(`sbUpdate(${table}) network error:`, e.message); return null; }
   const text = await r.text();
   if (!text || !text.trim()) return null;
   try { return JSON.parse(text); } catch(e) { return null; }
 }
 async function sbDelete(table, filter) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
-    method:"DELETE", headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
-  }); return r.ok;
+  try {
+    const r = await fetchRetry(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+      method:"DELETE", headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
+    }); return r.ok;
+  } catch (e) { console.error(`sbDelete(${table}) network error:`, e.message); return false; }
 }
 // Exact row count without transferring the rows — reads Content-Range from a
 // count=exact HEAD-style request (we ask for a single row to keep it cheap).
 async function sbCount(table, filter) {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter || ""}`, {
+    const r = await fetchRetry(`${SUPABASE_URL}/rest/v1/${table}?${filter || ""}`, {
       headers:{ "apikey":SUPABASE_SERVICE, "Authorization":`Bearer ${SUPABASE_SERVICE}`, "Prefer":"count=exact", "Range":"0-0" },
     });
     const cr = r.headers.get("content-range"); // "0-0/1234" or "*/1234"
@@ -993,7 +1019,7 @@ app.post("/auth/signup", async (req, res) => {
       }
     }
 
-    const authRes = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+    const authRes = await fetchRetry(`${SUPABASE_URL}/auth/v1/signup`, {
       method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email, password }),
     });
     const authData = await authRes.json();
@@ -1058,7 +1084,7 @@ app.post("/auth/signup", async (req, res) => {
 
     if (accessToken) return res.json({ access_token:accessToken, refresh_token:authData.refresh_token||null, user:{ id:userId, email:authData.user?.email||email, username: trimmedUsername } });
 
-    const siRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email, password }) });
+    const siRes  = await fetchRetry(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email, password }) });
     const siData = await siRes.json();
     if (siData.error) return res.status(400).json({ error:"Account created! Please sign in." });
     res.json({ access_token:siData.access_token, refresh_token:siData.refresh_token||null, user:{ id:siData.user?.id||userId, email:siData.user?.email||email, username: trimmedUsername } });
@@ -1074,22 +1100,40 @@ app.post("/auth/signin", async (req, res) => {
     // Case-insensitive username lookup. The frontend lowercases what the user types,
     // but profile rows (especially the branded admin account) may be stored with
     // capitals — an exact match would fail to find them and the login would bounce.
-    const profiles = await sbSelect("profiles", `username=ilike.${encodeURIComponent(username)}`);
+    // Done directly with fetchRetry (rather than sbSelect) so a transient network
+    // failure here can be told apart from a genuine "no such username" — sbSelect
+    // swallows fetch errors down to an empty array, which would otherwise show
+    // "Username not found" for what's actually just a dropped connection.
+    let profiles;
+    try {
+      const pr = await fetchRetry(`${SUPABASE_URL}/rest/v1/profiles?username=ilike.${encodeURIComponent(username)}`, {
+        headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
+      });
+      profiles = await pr.json();
+    } catch (e) {
+      console.error("Signin profile lookup network error:", e.message);
+      return res.status(503).json({ error:"Sign-in service is temporarily unavailable. Please try again in a moment." });
+    }
     if (!Array.isArray(profiles)||profiles.length===0) {
-      // Also try looking up by checking if username matches an auth user with that email pattern
       return res.status(400).json({ error:"Username not found. If you just signed up, your account may still be setting up — please wait a moment and try again." });
     }
     const profile = profiles[0];
-    const userRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${profile.id}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
+    const userRes = await fetchRetry(`${SUPABASE_URL}/auth/v1/admin/users/${profile.id}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
     const userData = await userRes.json();
     if (!userData?.email) return res.status(400).json({ error:"Could not find account." });
-    const siRes  = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email:userData.email, password }) });
+    const siRes  = await fetchRetry(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY}, body:JSON.stringify({ email:userData.email, password }) });
     const siData = await siRes.json();
     if (siData.error||siData.error_description) return res.status(400).json({ error:siData.error_description||siData.error?.message||"Sign in failed." });
     const userId = siData.user?.id || profile.id;
     const userEmail = siData.user?.email || userData.email;
     res.json({ access_token:siData.access_token, refresh_token:siData.refresh_token||null, user:{ id:userId, email:userEmail, username:profile.username } });
-  } catch(e) { res.status(500).json({ error:e.message }); }
+  } catch(e) {
+    console.error("Signin error:", e.message);
+    const friendly = /premature close|socket hang up|aborted|ECONNRESET|ETIMEDOUT/i.test(e.message||"")
+      ? "Sign-in service is temporarily unavailable. Please try again in a moment."
+      : e.message;
+    res.status(500).json({ error: friendly });
+  }
 });
 
 // ── Auth: refresh access token ────────────────────────────────
@@ -1097,7 +1141,7 @@ app.post("/auth/refresh", async (req, res) => {
   try {
     const { refresh_token } = req.body;
     if (!refresh_token) return res.status(400).json({ error:"Missing refresh_token." });
-    const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    const r = await fetchRetry(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
       method:"POST", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY},
       body:JSON.stringify({ refresh_token }),
     });
@@ -1115,7 +1159,7 @@ app.post("/auth/forgot-password", async (req, res) => {
     if (!email) return res.status(400).json({ error:"Email required." });
 
     // Generate a password reset link via Supabase admin API
-    const linkRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/generate_link`, {
+    const linkRes = await fetchRetry(`${SUPABASE_URL}/auth/v1/admin/generate_link`, {
       method:"POST",
       headers:{"Content-Type":"application/json","apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`},
       body:JSON.stringify({ type:"recovery", email, options:{ redirectTo:`${APP_URL}?type=recovery` } }),
@@ -1127,7 +1171,7 @@ app.post("/auth/forgot-password", async (req, res) => {
       await sendEmail(email, "Reset your TrackMyPlacements password", passwordResetEmailHtml(linkData.action_link));
     } else if (!linkData.action_link) {
       // Fallback: trigger Supabase's built-in recovery email
-      await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+      await fetchRetry(`${SUPABASE_URL}/auth/v1/recover`, {
         method:"POST",
         headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY},
         body:JSON.stringify({ email }),
@@ -1148,7 +1192,7 @@ app.post("/auth/reset-password", async (req, res) => {
     const { access_token, new_password } = req.body;
     if (!access_token||!new_password) return res.status(400).json({ error:"Missing fields." });
     if (new_password.length<6) return res.status(400).json({ error:"Password must be 6+ characters." });
-    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    const r = await fetchRetry(`${SUPABASE_URL}/auth/v1/user`, {
       method:"PUT", headers:{"Content-Type":"application/json","apikey":SUPABASE_KEY,"Authorization":`Bearer ${access_token}`}, body:JSON.stringify({ password:new_password }),
     });
     const data = await r.json();
@@ -2282,7 +2326,7 @@ app.post("/subscribe", async (req, res) => {
     console.log("Price ID:", priceId, "T1:", STRIPE_PRICE_T1, "T2:", STRIPE_PRICE_T2);
     if (!priceId) return res.status(500).json({ error:"Price ID not configured. Check STRIPE_PRICE_ID env var." });
 
-    const uRes  = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${user_id}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
+    const uRes  = await fetchRetry(`${SUPABASE_URL}/auth/v1/admin/users/${user_id}`, { headers:{"apikey":SUPABASE_SERVICE,"Authorization":`Bearer ${SUPABASE_SERVICE}`} });
     const uData = await uRes.json();
     console.log("User email:", uData?.email);
     if (!uData?.email) return res.status(400).json({ error:"User not found." });
@@ -2389,14 +2433,23 @@ app.post("/cancel", async (req, res) => {
     // Include trialing + past_due, not just active — these all have a live, cancellable sub.
     const subs = await stripeRequest(`/subscriptions?customer=${profile.stripe_customer_id}&status=all`);
     const live = (subs.data || []).filter(s => ["trialing","active","past_due"].includes(s.status));
-    const target = live.find(s => !s.cancel_at_period_end);
-    if (!target) {
-      // Already scheduled to cancel, or nothing live — treat as success so the UI stays clean.
-      if (live.length) return res.json({ success:true });
+    if (!live.length) {
       return res.json({ success:true, noBilling:true, notice:"No active subscription found — nothing to cancel." });
     }
-    const cancelled = await stripeRequest(`/subscriptions/${target.id}`,"POST",{ cancel_at_period_end:"true" });
-    if (cancelled.error) return res.status(400).json({ error:cancelled.error.message });
+    // IMPORTANT: cancel EVERY live subscription on the customer, not just one.
+    // A customer can end up with more than one live subscription — e.g. they
+    // switched tiers via a fresh Checkout session without the old one being
+    // canceled first — and previously we only canceled the first match found,
+    // leaving the other(s) live and still billing even after the user saw
+    // "cancelled" in the UI. Cancel all of them and only report success if
+    // every one actually went through.
+    const toCancel = live.filter(s => !s.cancel_at_period_end);
+    const results = await Promise.all(toCancel.map(s => stripeRequest(`/subscriptions/${s.id}`, "POST", { cancel_at_period_end:"true" })));
+    const failures = results.filter(r => r && r.error);
+    if (failures.length) {
+      console.error("Cancel failed for some subscriptions:", user_id, failures.map(f => f.error.message));
+      return res.status(400).json({ error: failures[0].error.message });
+    }
     res.json({ success:true });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
