@@ -183,21 +183,34 @@ app.get("/admin/reset-ratelimit", (req, res) => {
 // Outbound calls to Supabase (and Stripe) occasionally fail with transient,
 // non-HTTP errors like "Premature close" / "socket hang up" / "aborted" —
 // the connection dropping mid-response. This is usually a stale keep-alive
-// socket, but can also mean the upstream (Supabase) is degraded — e.g. their
-// status page showing "Degraded Performance" on compute capacity — in which
-// case connections hang or drop repeatedly for longer stretches, not just a
-// single blip. Retry a few times with backoff+jitter, and give each attempt
-// its own timeout so a hanging/degraded connection doesn't stall the whole
-// request — it fails fast and retries instead. Only retries network-level
-// throws, not HTTP error statuses (a real 400/401/etc. should NOT be retried).
+// socket, but can also mean the upstream (Supabase) is degraded, in which
+// case connections hang or drop repeatedly, not just as a single blip.
+//
+// IMPORTANT: "Premature close" happens while the response BODY is being
+// streamed in — not while the initial fetch() promise resolves (that only
+// waits for headers). An earlier version of this function only wrapped the
+// fetch() call itself in the retry loop, and callers read the body (.text()/
+// .json()) afterward, outside the loop — so a drop during the body read
+// was never actually retried, it just threw once and gave up. This version
+// reads the body itself, inside the loop, so a failure there triggers a
+// full fresh retry (new connection, new attempt) like it's supposed to.
+// Returns a Response-like object (ok/status/headers/.text()/.json()) so
+// every existing caller keeps working unchanged.
 async function fetchRetry(url, opts = {}, retries = 3, delayMs = 400, timeoutMs = 10000) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const r = await fetch(url, Object.assign({}, opts, { signal: controller.signal }));
+      const text = await r.text(); // read the body NOW, still inside the retry loop
       clearTimeout(timer);
-      return r;
+      return {
+        ok: r.ok,
+        status: r.status,
+        headers: r.headers,
+        text: async () => text,
+        json: async () => JSON.parse(text),
+      };
     } catch (e) {
       clearTimeout(timer);
       const transient = /premature close|socket hang up|aborted|ECONNRESET|ETIMEDOUT|network|timeout/i.test(e.message || "") || e.name === "AbortError";
