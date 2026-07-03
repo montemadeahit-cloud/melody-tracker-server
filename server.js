@@ -3023,3 +3023,4 @@ app.listen(port, "0.0.0.0", () => {
   // ALTER TABLE profiles ADD COLUMN IF NOT EXISTS fingerprint_log JSONB DEFAULT '[]'::jsonb;
   console.log("Note: ensure profiles.fingerprint_log JSONB column exists in Supabase.");
 });
+
