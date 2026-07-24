@@ -531,8 +531,9 @@ async function identifyACR(buffer, filename, mimetype) {
 // Second fingerprint engine — different database, parallel to ACRCloud.
 // Returns results normalised into ACRCloud music-entry shape.
 const AUDD_KEY = process.env.AUDD_API_TOKEN;
+if (!AUDD_KEY) console.error("AUDD DISABLED: AUDD_API_TOKEN env var is not set — AudD will be skipped on every scan.");
 async function identifyAudd(buffer, filename) {
-  if (!AUDD_KEY) return null;
+  if (!AUDD_KEY) { console.warn("AudD skipped: no AUDD_API_TOKEN set"); return null; }
   try {
     const form = new FormData();
     form.append("file",    buffer, { filename, contentType: "audio/mpeg" });
@@ -540,7 +541,9 @@ async function identifyAudd(buffer, filename) {
     form.append("return",    "spotify,deezer,itunes,youtube");
     const res  = await fetch("https://api.audd.io/", { method:"POST", body:form });
     const data = await res.json();
-    if (data?.status !== "success" || !data?.result) return null;
+    if (data?.status !== "success") { console.error("AudD request failed:", JSON.stringify(data)); return null; }
+    console.log(`AudD call OK — result:${data?.result ? "match" : "no match"}`);
+    if (!data?.result) return null;
     const norm = normaliseAuddResult(data.result);
     if (!norm) return null;
     // Wrap in ACRCloud envelope shape so mergeAllResults handles it uniformly
